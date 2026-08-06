@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, Timestamped, UUIDPk
+from app.core.base import Base, Timestamped, UUIDPk
 
 
 class Vertical(Base, UUIDPk, Timestamped):

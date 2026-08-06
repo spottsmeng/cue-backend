@@ -5,7 +5,7 @@ from sqlalchemy import Enum, ForeignKey, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TZDateTime, UUIDPk
+from app.core.base import Base, TZDateTime, UUIDPk
 from app.models.ledger import CommitmentState
 
 # Fixed set of ledger-mutation kinds this audit trail records — a mechanism
@@ -42,7 +42,7 @@ class AuditLog(Base, UUIDPk):
     )
     action: Mapped[str] = mapped_column(AuditAction)
     actor_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), default=None, comment="FK to users table, deferred to identity module"
+        UUID(as_uuid=True), ForeignKey("users.id"), default=None
     )
     occurred_at: Mapped[datetime] = mapped_column(TZDateTime, server_default=func.now())
     from_state: Mapped[str | None] = mapped_column(CommitmentState, default=None)

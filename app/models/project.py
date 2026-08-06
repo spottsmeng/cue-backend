@@ -5,7 +5,7 @@ from sqlalchemy import Enum, ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, Timestamped, TZDateTime, UUIDPk
+from app.core.base import Base, Timestamped, TZDateTime, UUIDPk
 
 # Fixed, closed set — bounded by which integrations the platform actually implements
 # an adapter for. Not domain vocabulary, so it stays a native enum rather than an

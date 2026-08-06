@@ -51,12 +51,14 @@ async def _make_commitment(app_session, project_id, vendor, internal) -> Commitm
 
 
 @pytest.mark.asyncio
-async def test_record_audit_event_writes_a_row(app_session, owner_session, org_and_project, parties):
+async def test_record_audit_event_writes_a_row(
+    app_session, owner_session, org_and_project, parties, seeded_user
+):
     org_id, project_id = org_and_project
     vendor, internal = parties
     await set_org_context(app_session, org_id)
     commitment = await _make_commitment(app_session, project_id, vendor, internal)
-    actor_id = uuid.uuid4()
+    actor_id = seeded_user.id
 
     await record_audit_event(
         app_session,

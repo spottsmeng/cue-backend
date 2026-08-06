@@ -4,7 +4,7 @@ from sqlalchemy import Enum, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, Timestamped, UUIDPk
+from app.core.base import Base, Timestamped, UUIDPk
 from app.models.project import ChannelType
 
 PartyType = Enum("person", "vendor_org", "internal_staff", name="party_type")

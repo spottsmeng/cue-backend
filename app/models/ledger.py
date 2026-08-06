@@ -5,7 +5,7 @@ from sqlalchemy import CheckConstraint, Enum, ForeignKey, Numeric
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, Timestamped, TZDateTime, UUIDPk
+from app.core.base import Base, Timestamped, TZDateTime, UUIDPk
 from app.models.project import ChannelType
 
 # Fixed, structural state machines (PRD §6.5, §4.3) — not domain vocabulary that
@@ -128,7 +128,7 @@ class Commitment(Base, UUIDPk, Timestamped):
     field_confidence: Mapped[dict] = mapped_column(JSONB, default=dict)
     verification_state: Mapped[str] = mapped_column(VerificationState, default="auto")
     verified_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), default=None, comment="FK to users table, deferred to identity module"
+        UUID(as_uuid=True), ForeignKey("users.id"), default=None
     )
     verified_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
 
@@ -187,8 +187,7 @@ class Budget(Base, UUIDPk):
     approved_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column()
     approved_by: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        comment="FK to users table, deferred to identity module; Finance/Producer role only",
+        UUID(as_uuid=True), ForeignKey("users.id"), comment="Finance/Producer role only"
     )
     approved_at: Mapped[datetime] = mapped_column(TZDateTime)
     revision_of: Mapped[uuid.UUID | None] = mapped_column(

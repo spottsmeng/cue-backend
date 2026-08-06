@@ -1,4 +1,5 @@
-from app.models.base import Base
+from app.identity.models import Delegation, Membership, User
+from app.core.base import Base
 from app.models.vertical import Vertical
 from app.models.organisation import Organisation
 from app.models.project import Project, Channel
@@ -22,4 +23,7 @@ __all__ = [
     "Milestone",
     "Budget",
     "AuditLog",
+    "User",
+    "Membership",
+    "Delegation",
 ]

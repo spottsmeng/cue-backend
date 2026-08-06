@@ -5,7 +5,7 @@ from sqlalchemy import ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TZDateTime, UUIDPk
+from app.core.base import Base, TZDateTime, UUIDPk
 
 
 class OntologyTerm(Base, UUIDPk):

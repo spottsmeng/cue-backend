@@ -18,6 +18,9 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.identity.config import get_identity_settings
+from app.identity.models import Membership, User
+from app.identity.tokens import mint_local_token
 from app.models import Base, Organisation, Party, Project
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -148,6 +151,31 @@ async def set_org_context(session, org_id: uuid.UUID, *, is_local: bool = False)
     )
 
 
+def mint_token(org_id: uuid.UUID, *, subject: str | None = None, email: str | None = None) -> str:
+    """Bearer token for the "local" auth provider (app/identity/tokens.py) —
+    what every API-level test authenticates with, exercising the real
+    get_current_user/RBAC dependency chain (app/api/deps.py) rather than the
+    old X-Org-Id/X-User-Id header stub. A fresh `subject` (the default) mints
+    a brand-new identity, auto-provisioned as a `users` row on its first
+    authenticated request; pass the same `subject` again — or reuse the
+    returned token — to keep acting as the same person across multiple
+    calls."""
+    settings = get_identity_settings()
+    subject = subject or f"sub-{uuid.uuid4()}"
+    email = email or f"{subject}@example.test"
+    return mint_local_token(
+        subject=subject,
+        org_id=org_id,
+        secret=settings.local_jwt_secret,
+        issuer=settings.local_issuer,
+        email=email,
+    )
+
+
+def auth_headers(org_id: uuid.UUID, **kwargs) -> dict[str, str]:
+    return {"Authorization": f"Bearer {mint_token(org_id, **kwargs)}"}
+
+
 async def _reseed_universal_ontology_terms(conn) -> None:
     """The 9 universal commitment_act terms, re-inserted after every
     TRUNCATE. Not the seed migration's own logic reused — this is a separate,
@@ -216,6 +244,53 @@ async def org_and_project(app_session, seeded_vertical_id):
     await app_session.flush()
     await app_session.commit()
     return org_id, project_id
+
+
+@pytest_asyncio.fixture
+async def seeded_user(app_session, org_and_project) -> User:
+    """A bare `users` row for org_and_project's organisation — exists to
+    satisfy the FK now on commitments.verified_by / budgets.approved_by /
+    audit_log.actor_id (app/identity/models.py), for tests that write those
+    columns directly against app_session rather than through the
+    authenticated REST API."""
+    org_id, _ = org_and_project
+    await set_org_context(app_session, org_id)
+    user = User(
+        organisation_id=org_id,
+        issuer=get_identity_settings().local_issuer,
+        external_subject=f"seeded-{uuid.uuid4()}",
+        email=f"seeded-{uuid.uuid4()}@example.test",
+    )
+    app_session.add(user)
+    await app_session.commit()
+    return user
+
+
+@pytest_asyncio.fixture
+async def authed_org_and_project(app_session, org_and_project):
+    """org_and_project, plus a real `users` row granted "administrator"
+    membership on that project and a bearer token authenticating as them —
+    the ready-made "someone who can do anything on this project" identity
+    most REST-layer tests (test_projects_api.py, test_commitments_api.py)
+    need, without each one having to provision a user through the API
+    itself."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    subject = f"admin-{uuid.uuid4()}"
+    user = User(
+        organisation_id=org_id,
+        issuer=get_identity_settings().local_issuer,
+        external_subject=subject,
+        email=f"{subject}@example.test",
+    )
+    app_session.add(user)
+    await app_session.flush()
+    app_session.add(
+        Membership(user_id=user.id, project_id=project_id, role="administrator", granted_by=user.id)
+    )
+    await app_session.commit()
+    token = mint_token(org_id, subject=subject, email=user.email)
+    return org_id, project_id, user, token
 
 
 @pytest_asyncio.fixture

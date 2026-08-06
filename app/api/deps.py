@@ -1,64 +1,110 @@
-"""Minimal, explicitly-temporary per-request auth/org-context.
+"""Real per-request identity/RBAC (PRD §6.14, FR-ADM-01 through FR-ADM-05),
+replacing the earlier X-Org-Id/X-User-Id dev-auth stub wholesale.
 
-THIS IS NOT REAL AUTH. No Entra ID, no session tokens, no RBAC roles — just
-two plain headers a caller sets by hand. It exists only so RLS-protected
-endpoints have *something* to set `app.current_org_id` from before the real
-identity/RBAC module gets built (PRD §6.14, FR-ADM-01/05). Replace this
-wholesale then; do not extend it with real-auth features in the meantime.
-
-`X-Org-Id` is required — every RLS-protected query fails closed (returns
-nothing / rejects writes) without it, per app/core/db.py's get_session
-docstring, so there is no safe default to fall back to. `X-User-Id` is
-optional and only ever used as the audit trail's `actor_id` — every FK to it
-is nullable, same convention as `Commitment.verified_by`.
+Every RLS-protected query still needs `app.current_org_id` set before it runs
+(app/core/db.py's get_session docstring) — the difference is where that value
+now comes from: the verified bearer token's `org_id` claim
+(app/identity/tokens.py), never a header a caller can simply set by hand.
 """
 
 import uuid
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
+from app.identity.models import User
+from app.identity.service import effective_roles, resolve_user
+from app.identity.tokens import TokenVerificationError, get_token_verifier
 from app.models import Project
 
+_bearer_scheme = HTTPBearer(
+    auto_error=True, description="CUE identity JWT — see app/identity/tokens.py"
+)
 
-async def get_org_id(
-    x_org_id: Annotated[
-        uuid.UUID,
-        Header(description="STUB dev auth: organisation to scope this request to. Not real auth."),
-    ],
+
+async def get_current_user(
+    credentials: Annotated[HTTPAuthorizationCredentials, Depends(_bearer_scheme)],
     session: Annotated[AsyncSession, Depends(get_session)],
-) -> uuid.UUID:
-    """SELECT set_config(...), is_local=true — scoped to this request's
-    transaction so the value can't leak across a pooled connection into a
-    different request (see app/core/db.py's get_session docstring; Postgres's
-    SET statement doesn't accept bind parameters at all, only the function
-    form does)."""
+) -> User:
+    """Verifies the bearer token via the provider-pluggable
+    app/identity/tokens.py (local HS256 for dev/test, OIDC/JWKS in
+    production — a config change, not a code change), sets
+    `app.current_org_id` from the token's own `org_id` claim, and
+    resolves/provisions the corresponding `users` row (app/identity/service.py's
+    resolve_user — SCIM pre-provisioning is out of scope this session, so
+    "seen in a verified token" is what creates a user).
+
+    Cached per request by FastAPI's dependency resolution — every other
+    dependency in this module that needs the caller's identity depends on
+    this one rather than re-verifying the token itself.
+    """
+    verifier = get_token_verifier()
+    try:
+        claims = verifier.verify(credentials.credentials)
+    except TokenVerificationError as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
+
     await session.execute(
-        text("SELECT set_config('app.current_org_id', :oid, true)"), {"oid": str(x_org_id)}
+        text("SELECT set_config('app.current_org_id', :oid, true)"), {"oid": str(claims.org_id)}
     )
-    return x_org_id
+    return await resolve_user(session, claims)
 
 
-async def get_actor_id(
-    x_user_id: Annotated[
-        uuid.UUID | None,
-        Header(description="STUB dev auth: acting user, recorded on the audit trail. Not real auth."),
-    ] = None,
-) -> uuid.UUID | None:
-    return x_user_id
+async def get_org_id(user: Annotated[User, Depends(get_current_user)]) -> uuid.UUID:
+    """What org-scoped-but-not-project-scoped endpoints (project provisioning)
+    key off — always the authenticated user's own organisation, never a
+    client-supplied value."""
+    return user.organisation_id
 
 
-async def get_project(
-    project_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    org_id: Annotated[uuid.UUID, Depends(get_org_id)],  # noqa: ARG001 — ordering: RLS context must be set first
-) -> Project:
-    project = (
-        await session.execute(select(Project).where(Project.id == project_id))
-    ).scalar_one_or_none()
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-    return project
+async def get_actor_id(user: Annotated[User, Depends(get_current_user)]) -> uuid.UUID:
+    """The audit trail's `actor_id` (FR-LED-12) — always a real, verified
+    user now, never the optional/spoofable header the dev stub allowed."""
+    return user.id
+
+
+def require_project_role(*roles: str):
+    """Dependency factory replacing the stub's plain `get_project`.
+
+    The caller must have a membership (any role) on `project_id`, or an
+    active delegation onto it, to learn the project exists at all
+    (FR-ADM-02) — a non-member gets 404, indistinguishable from a genuinely
+    nonexistent project, so membership itself is never leaked by the status
+    code. If `roles` is given, the user's *effective* role set (own
+    membership role plus any currently-active delegated role — see
+    app/identity/service.py's effective_roles) must intersect it, or the
+    request is a 403: they can see the project, they just can't do this
+    specific thing on it.
+
+    `Depends(require_project_role())` (no roles) is the read-access shape,
+    aliased below as `get_project` for the read-only endpoints that used the
+    stub's dependency directly; `Depends(require_project_role(*WRITE_ROLES))`
+    is what every ledger-mutating endpoint uses.
+    """
+
+    async def dependency(
+        project_id: uuid.UUID,
+        session: Annotated[AsyncSession, Depends(get_session)],
+        user: Annotated[User, Depends(get_current_user)],
+    ) -> Project:
+        project = (
+            await session.execute(select(Project).where(Project.id == project_id))
+        ).scalar_one_or_none()
+        if project is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        granted = await effective_roles(session, user.id, project_id)
+        if not granted:
+            raise HTTPException(status_code=404, detail="project not found")
+        if roles and not (granted & set(roles)):
+            raise HTTPException(status_code=403, detail="insufficient role for this action")
+        return project
+
+    return dependency
+
+
+get_project = require_project_role()

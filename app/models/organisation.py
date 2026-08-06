@@ -4,7 +4,7 @@ from sqlalchemy import ForeignKey
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, Timestamped, UUIDPk
+from app.core.base import Base, Timestamped, UUIDPk
 
 
 class Organisation(Base, UUIDPk, Timestamped):

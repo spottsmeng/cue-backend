@@ -7,7 +7,6 @@ The trigger is DEFERRED to COMMIT, so these tests must genuinely commit (or
 observe a commit failure) — a rollback-based test would never fire it.
 """
 
-import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -80,7 +79,9 @@ async def test_commitment_with_evidence_in_same_transaction_succeeds(
 
 
 @pytest.mark.asyncio
-async def test_budget_without_evidence_is_rejected_at_commit(app_session, org_and_project):
+async def test_budget_without_evidence_is_rejected_at_commit(
+    app_session, org_and_project, seeded_user
+):
     org_id, project_id = org_and_project
     await set_org_context(app_session, org_id)
 
@@ -88,7 +89,7 @@ async def test_budget_without_evidence_is_rejected_at_commit(app_session, org_an
         project_id=project_id,
         approved_amount=50000,
         currency="SGD",
-        approved_by=uuid.uuid4(),
+        approved_by=seeded_user.id,
         approved_at=datetime.now(timezone.utc),
         is_current=True,
     )
@@ -101,7 +102,7 @@ async def test_budget_without_evidence_is_rejected_at_commit(app_session, org_an
 
 
 @pytest.mark.asyncio
-async def test_budget_with_evidence_succeeds(app_session, org_and_project):
+async def test_budget_with_evidence_succeeds(app_session, org_and_project, seeded_user):
     org_id, project_id = org_and_project
     await set_org_context(app_session, org_id)
 
@@ -109,7 +110,7 @@ async def test_budget_with_evidence_succeeds(app_session, org_and_project):
         project_id=project_id,
         approved_amount=50000,
         currency="SGD",
-        approved_by=uuid.uuid4(),
+        approved_by=seeded_user.id,
         approved_at=datetime.now(timezone.utc),
         is_current=True,
     )

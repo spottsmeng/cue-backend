@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_actor_id, get_project
+from app.api.deps import get_actor_id, get_project, require_project_role
 from app.api.schemas import (
     CommitmentCreate,
     CommitmentOut,
@@ -18,10 +18,13 @@ from app.api.schemas import (
     VerifyRequest,
 )
 from app.core.db import get_session
+from app.identity.service import WRITE_ROLES
 from app.ledger.audit import record_audit_event
 from app.ledger.extractor import _get_commitment_act_term
 from app.ledger.lifecycle import InvalidTransition, validate_transition
 from app.models import Commitment, Deliverable, Evidence, Party, Project
+
+_require_write = require_project_role(*WRITE_ROLES)
 
 router = APIRouter(prefix="/projects/{project_id}/commitments", tags=["commitments"])
 
@@ -173,9 +176,9 @@ async def read_commitment(
 @router.post("", response_model=CommitmentOut, status_code=201)
 async def create_commitment(
     body: CommitmentCreate,
-    project: Annotated[Project, Depends(get_project)],
+    project: Annotated[Project, Depends(_require_write)],
     session: Annotated[AsyncSession, Depends(get_session)],
-    actor_id: Annotated[uuid.UUID | None, Depends(get_actor_id)],
+    actor_id: Annotated[uuid.UUID, Depends(get_actor_id)],
 ) -> CommitmentOut:
     """FR-LED-10: manual creation, with the same evidence requirement as
     extracted commitments — satisfied here by an Evidence row that names the
@@ -210,13 +213,12 @@ async def create_commitment(
     session.add(commitment)
     await session.flush()  # need commitment.id for the evidence row below
 
-    who = f"user {actor_id}" if actor_id is not None else "an unidentified user (dev auth stub)"
     evidence = Evidence(
         commitment_id=commitment.id,
         channel="manual",
         sent_at=datetime.now(dt_timezone.utc),
         language="en",
-        original_text=f"Manually entered via the CUE API by {who} (FR-LED-10).",
+        original_text=f"Manually entered via the CUE API by user {actor_id} (FR-LED-10).",
     )
     session.add(evidence)
     await session.flush()
@@ -238,9 +240,9 @@ async def create_commitment(
 async def verify_commitment(
     commitment_id: uuid.UUID,
     body: VerifyRequest,
-    project: Annotated[Project, Depends(get_project)],
+    project: Annotated[Project, Depends(_require_write)],
     session: Annotated[AsyncSession, Depends(get_session)],
-    actor_id: Annotated[uuid.UUID | None, Depends(get_actor_id)],
+    actor_id: Annotated[uuid.UUID, Depends(get_actor_id)],
 ) -> CommitmentOut:
     """FR-LED-08: three-tap verification. 'View evidence' is
     GET /{commitment_id} (evidence[] is always in that response, per §11.1);
@@ -280,9 +282,9 @@ async def verify_commitment(
 async def transition_commitment(
     commitment_id: uuid.UUID,
     body: TransitionRequest,
-    project: Annotated[Project, Depends(get_project)],
+    project: Annotated[Project, Depends(_require_write)],
     session: Annotated[AsyncSession, Depends(get_session)],
-    actor_id: Annotated[uuid.UUID | None, Depends(get_actor_id)],
+    actor_id: Annotated[uuid.UUID, Depends(get_actor_id)],
 ) -> CommitmentOut:
     """FR-LCY-01. Manual/API-driven transitions only — automatic transitions
     from silence/upstream-slip/forecast-breach (FR-LCY-02/03) depend on

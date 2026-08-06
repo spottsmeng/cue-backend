@@ -15,6 +15,61 @@ CommitmentStateLiteral = Literal[
 VerificationStateLiteral = Literal["auto", "pending_verification", "human_verified", "human_corrected"]
 PaymentStatusLiteral = Literal["unpaid", "invoiced", "paid"]
 
+# Mirrors app/identity/models.py's MembershipRole native enum — same
+# separation the ledger Literals above already draw from their SQLAlchemy
+# Enum counterparts.
+MembershipRoleLiteral = Literal[
+    "project_manager", "producer", "finance", "account_manager", "designer",
+    "administrator", "delegate", "read_only",
+]
+
+
+class MembershipCreate(BaseModel):
+    """FR-ADM-06's 'assign members' step. Keyed by email, not user_id — an
+    admin knows a colleague's email, not their internal uuid, and there is no
+    SCIM pre-provisioning (out of scope this session) to invite someone who
+    has never signed in; the user must already exist in this organisation
+    (i.e. have authenticated at least once)."""
+
+    email: str
+    role: MembershipRoleLiteral
+
+
+class MembershipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    project_id: uuid.UUID
+    role: MembershipRoleLiteral
+    granted_at: datetime
+    granted_by: uuid.UUID | None
+
+
+class DelegationCreate(BaseModel):
+    """FR-ADM-03: time-boxed delegation. `expires_at` is required — there is
+    no un-time-boxed delegation, by design (PRD: 'time-boxed delegation for
+    absence and handover, with scope and expiry')."""
+
+    delegate_email: str
+    role: MembershipRoleLiteral
+    expires_at: datetime
+
+
+class DelegationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    delegator_id: uuid.UUID
+    delegate_id: uuid.UUID
+    role: MembershipRoleLiteral
+    granted_at: datetime
+    granted_by: uuid.UUID
+    expires_at: datetime
+    revoked_at: datetime | None
+    revoked_by: uuid.UUID | None
+
 
 class ProjectCreate(BaseModel):
     name: str
@@ -22,6 +77,11 @@ class ProjectCreate(BaseModel):
     venue: str | None = None
     timezone: str = "Asia/Singapore"
     vertical_code: str = "event-production"
+    # FR-ADM-06: provisioning and initial member assignment as one call, under
+    # the brief's 10-minute bar — the creator is granted "administrator"
+    # membership automatically (see app/api/projects.py), this is for anyone
+    # else who should have access from the start.
+    members: list[MembershipCreate] = []
 
 
 class ProjectOut(BaseModel):
