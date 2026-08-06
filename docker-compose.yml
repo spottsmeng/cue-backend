@@ -15,6 +15,11 @@ services:
     volumes:
       - cue_postgres_data:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cue -d cue"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   cue_postgres_data:

@@ -1,0 +1,84 @@
+name: cue-eval (Ollama)
+
+# Informational only, deliberately not part of the required pytest gate:
+# cue-eval/README.md calls this suite "a smoke test and a regression gate,
+# not an accuracy measurement" — ten synthetic cases, scored against
+# zero-cost local qwen2.5:14b per project policy (Anthropic spend is
+# deferred until go-live). run_eval.py never exits non-zero on a low score,
+# only if Ollama itself is unreachable, so there is nothing here to "fail"
+# a PR on by design — read the step summary for the numbers.
+#
+# Runs only when cue-eval/ actually changes (prompt/schema/cases tuning),
+# plus on-demand, rather than on every unrelated PR — pulling and running a
+# 14B model is slow and this suite's own discipline (CLAUDE.md) is to
+# re-run it when the extraction prompt changes, not on every commit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: "Repeat count per case (CLAUDE.md: --runs 5 before trusting a result)"
+        default: "1"
+      band:
+        description: "Optional: only this band (easy | code-switched | multi | ambiguous-date)"
+        default: ""
+  pull_request:
+    paths:
+      - "cue-eval/**"
+  push:
+    branches: [main]
+    paths:
+      - "cue-eval/**"
+
+jobs:
+  cue-eval:
+    name: cue-eval vs qwen2.5:14b
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Ollama model blobs
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          # Bump the -v1 suffix if the pulled model tag ever changes.
+          key: ollama-models-qwen2.5-14b-v1
+
+      - name: Install Ollama
+        run: curl -fsSL https://ollama.com/install.sh | sh
+
+      - name: Start Ollama (unprivileged, not the installer's systemd unit)
+        # The installer auto-starts a systemd service running as its own
+        # `ollama` system user when systemd is present (true on GitHub's
+        # Ubuntu runners) — stop that first so `ollama serve` runs as the
+        # `runner` user instead, keeping model storage at the default
+        # ~/.ollama/models for that user, matching the cache path above.
+        run: |
+          sudo systemctl disable --now ollama 2>/dev/null || true
+          ollama serve > /tmp/ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/ > /dev/null && exit 0
+            sleep 2
+          done
+          echo "Ollama did not become ready in time" >&2
+          cat /tmp/ollama.log >&2
+          exit 1
+
+      - name: Pull qwen2.5:14b
+        run: ollama pull qwen2.5:14b
+
+      - name: Run cue-eval
+        working-directory: cue-eval
+        env:
+          RUNS: ${{ github.event.inputs.runs || '1' }}
+          BAND: ${{ github.event.inputs.band || '' }}
+        run: |
+          set -eu
+          extra_args=()
+          if [ -n "$BAND" ]; then extra_args+=(--band "$BAND"); fi
+          {
+            echo '```text'
+            python3 run_eval.py --runs "$RUNS" "${extra_args[@]}"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

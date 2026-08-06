@@ -1,0 +1,47 @@
+name: Backend tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: pytest-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (tests/, real Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Same default docker-compose.yml already falls back to for local dev
+      # (see .env.example) — not a secret, just the ephemeral CI Postgres
+      # container's password, torn down at the end of the job.
+      CUE_APP_DB_PASSWORD: cue_app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version-file: ".python-version"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Start Postgres
+        # Reuses docker-compose.yml directly (not a native Actions service
+        # container) so db/init/01-create-app-role.sql actually runs — that
+        # init script only fires on docker-entrypoint-initdb.d, which a bare
+        # postgres service container skips. --wait blocks on the healthcheck
+        # in docker-compose.yml, which only reports healthy once the init
+        # script has finished (the postgres image runs init scripts against a
+        # throwaway server before accepting connections on the real one).
+        run: docker compose up -d --wait
+
+      - name: Run pytest
+        # tests/conftest.py creates and migrates cue_test itself every run —
+        # no separate migration or database-creation step needed here.
+        run: uv run pytest
