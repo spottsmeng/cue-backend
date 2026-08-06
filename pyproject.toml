@@ -1,0 +1,44 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.19.0",
+    "asyncpg>=0.31.0",
+    "fastapi[standard]>=0.141.1",
+    "pydantic-settings>=2.14.2",
+    "sqlalchemy[asyncio]>=2.0.51",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-env>=1.7.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Session-scoped async fixtures (owner_engine, app.core.db's module-level
+# engine) create asyncpg connections bound to one event loop. Without this,
+# pytest-asyncio gives each test function its own loop by default, and any
+# session-scoped engine created in test 1's loop becomes unusable — "Future
+# attached to a different loop" — the moment test 2 runs. Both fixtures and
+# tests need to agree on loop scope for a shared engine to survive across
+# tests at all.
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+
+# Set before any test module is imported (pytest-env applies these ahead of
+# collection), which matters here specifically because app/core/db.py creates
+# its engine as a module-level singleton at import time — by the time a test
+# could set os.environ itself, that engine would already be built against the
+# wrong (dev) database. This is the one clean way to redirect it to cue_test
+# without restructuring db.py's engine-at-import pattern, which is otherwise
+# the right shape for the running app.
+[tool.pytest_env]
+CUE_DATABASE_URL = "postgresql+asyncpg://cue_app:cue_app@localhost:5432/cue_test"
+CUE_MIGRATION_DATABASE_URL = "postgresql+asyncpg://cue:cue@localhost:5432/cue_test"

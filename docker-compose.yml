@@ -1,0 +1,20 @@
+name: cue-backend
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: cue
+      POSTGRES_PASSWORD: cue
+      POSTGRES_DB: cue
+      # Read by db/init/01-create-app-role.sql to provision the app's
+      # non-superuser runtime role (RLS is inert for a superuser connection).
+      CUE_APP_DB_PASSWORD: ${CUE_APP_DB_PASSWORD:-cue_app}
+    ports:
+      - "5432:5432"
+    volumes:
+      - cue_postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+
+volumes:
+  cue_postgres_data:

@@ -1,0 +1,197 @@
+import uuid
+from datetime import datetime
+
+from sqlalchemy import CheckConstraint, Enum, ForeignKey, Numeric
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, Timestamped, TZDateTime, UUIDPk
+from app.models.project import ChannelType
+
+# Fixed, structural state machines (PRD §6.5, §4.3) — not domain vocabulary that
+# grows over time, so these stay native enums rather than ontology_terms rows.
+# Contrast with act_type/class_term_id/type_term_id below, which *are*
+# ontology-governed (CUE-Tech-Stack.md §5).
+CommitmentState = Enum(
+    "proposed", "committed", "at_risk", "delivered", "broken", "renegotiated", "withdrawn",
+    name="commitment_state",
+)
+VerificationState = Enum(
+    "auto", "pending_verification", "human_verified", "human_corrected",
+    name="verification_state",
+)
+PaymentStatus = Enum("unpaid", "invoiced", "paid", name="payment_status")
+
+# Scope note: Meeting, Document, Dependency, Risk, Deviation and Membership
+# (PRD §4.1) are not modelled in this pass — they belong to later build phases
+# (Twin, Documents, Governance). This file covers the Ledger core: Commitment,
+# Evidence, Deliverable, Milestone, Budget.
+
+
+class Milestone(Base, UUIDPk, Timestamped):
+    """PRD §4.1: MILESTONE ||--o{ DEPENDENCY; DELIVERABLE }o--|| MILESTONE : belongs_to"""
+
+    __tablename__ = "milestones"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), index=True
+    )
+    type_term_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ontology_terms.id"),
+        comment="ontology_terms row, category='milestone_type'",
+    )
+    name: Mapped[str] = mapped_column()
+    planned_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
+    actual_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
+    is_fixed: Mapped[bool] = mapped_column(
+        default=False, comment="FR-TWN-11: immovable node (doors open, venue hand-back)"
+    )
+
+
+class Deliverable(Base, UUIDPk, Timestamped):
+    """PRD §4.1: COMMITMENT }o--o| DELIVERABLE : concerns"""
+
+    __tablename__ = "deliverables"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), index=True
+    )
+    class_term_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ontology_terms.id"),
+        comment="ontology_terms row, category='deliverable_class'",
+    )
+    milestone_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("milestones.id"), default=None, index=True
+    )
+    name: Mapped[str] = mapped_column()
+
+
+class Commitment(Base, UUIDPk, Timestamped):
+    """PRD §4.3 — the core object.
+
+    The evidence-linkage requirement (FR-LED-03 / CLAUDE.md: "No commitment
+    without evidence... verified in code, not trusted") is not expressible as a
+    column-level constraint, since it depends on a *child table* having at least
+    one row. It is enforced by a deferred constraint trigger added in the Alembic
+    migration (`check_commitment_has_evidence`), not visible on this class — do
+    not read the absence of a constraint here as the absence of enforcement.
+    """
+
+    __tablename__ = "commitments"
+    __table_args__ = (
+        CheckConstraint(
+            "currency IS NULL OR length(currency) = 3", name="commitment_currency_iso4217_length"
+        ),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), index=True
+    )
+    party_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parties.id"), comment="who owes it"
+    )
+    counterparty_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parties.id"), comment="whom it is owed to"
+    )
+    deliverable_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("deliverables.id"), default=None
+    )
+    act_type_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ontology_terms.id"),
+        comment="ontology_terms row, category='commitment_act' (universal core, PRD §4.2.1)",
+    )
+    state: Mapped[str] = mapped_column(CommitmentState, default="proposed")
+
+    # Field names match the enforced extraction contract exactly (CLAUDE.md's
+    # extraction rules, cue-eval/schema.json) — not PRD §4.3's `description` /
+    # `description_original` wording. A noun phrase naming the thing promised
+    # ("LED screen install"), never a restatement of the message, never a time
+    # or price — CLAUDE.md: "The model buries them there otherwise."
+    deliverable_en: Mapped[str] = mapped_column(comment="canonical EN noun phrase")
+    deliverable_original: Mapped[str | None] = mapped_column(
+        default=None,
+        comment="verbatim source language; equals deliverable_en if source is EN",
+    )
+    due_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
+    amount: Mapped[float | None] = mapped_column(Numeric(12, 2), default=None)
+    currency: Mapped[str | None] = mapped_column(default=None)
+    payment_status: Mapped[str | None] = mapped_column(
+        PaymentStatus,
+        default=None,
+        comment="FR-LED-13: Finance-role-set only, never inferred by the model",
+    )
+
+    confidence: Mapped[float] = mapped_column(default=0.0)
+    field_confidence: Mapped[dict] = mapped_column(JSONB, default=dict)
+    verification_state: Mapped[str] = mapped_column(VerificationState, default="auto")
+    verified_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), default=None, comment="FK to users table, deferred to identity module"
+    )
+    verified_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
+
+    supersedes: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
+
+
+class Evidence(Base, UUIDPk):
+    """PRD §4.3. Belongs to exactly one of {commitment, budget} — enforced by the
+    CHECK constraint below, and is what the deferred trigger on the owning table
+    checks for existence of."""
+
+    __tablename__ = "evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "(commitment_id IS NOT NULL)::int + (budget_id IS NOT NULL)::int = 1",
+            name="evidence_exactly_one_subject",
+        ),
+    )
+
+    commitment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("commitments.id"), default=None, index=True
+    )
+    budget_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("budgets.id"), default=None, index=True
+    )
+
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        default=None,
+        comment="Points at the future Message/capture table — not modelled yet (Phase 1: Capture)",
+    )
+    channel: Mapped[str] = mapped_column(ChannelType)
+    sent_at: Mapped[datetime] = mapped_column(TZDateTime)
+    language: Mapped[str] = mapped_column(comment="bcp47")
+    original_text: Mapped[str] = mapped_column(comment="never overwritten")
+    translation: Mapped[str | None] = mapped_column(default=None)
+    media_ref: Mapped[str | None] = mapped_column(default=None, comment="signed, expiring URI")
+    transcript_confidence: Mapped[float | None] = mapped_column(default=None, comment="voice only")
+    span_start: Mapped[int | None] = mapped_column(default=None)
+    span_end: Mapped[int | None] = mapped_column(default=None)
+
+
+class Budget(Base, UUIDPk):
+    """PRD §4.3. `is_current` marks the active baseline; superseded baselines are
+    kept via `revision_of` rather than deleted, per FR-ADM-11's revision-history
+    requirement."""
+
+    __tablename__ = "budgets"
+    __table_args__ = (
+        CheckConstraint("length(currency) = 3", name="budget_currency_iso4217_length"),
+    )
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), index=True
+    )
+    approved_amount: Mapped[float] = mapped_column(Numeric(12, 2))
+    currency: Mapped[str] = mapped_column()
+    approved_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        comment="FK to users table, deferred to identity module; Finance/Producer role only",
+    )
+    approved_at: Mapped[datetime] = mapped_column(TZDateTime)
+    revision_of: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("budgets.id"), default=None
+    )
+    is_current: Mapped[bool] = mapped_column(default=True)
