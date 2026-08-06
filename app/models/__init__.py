@@ -5,6 +5,7 @@ from app.models.project import Project, Channel
 from app.models.party import Party, ChannelIdentity
 from app.models.ontology import OntologyTerm
 from app.models.ledger import Commitment, Evidence, Deliverable, Milestone, Budget
+from app.models.audit import AuditLog
 
 __all__ = [
     "Base",
@@ -20,4 +21,5 @@ __all__ = [
     "Deliverable",
     "Milestone",
     "Budget",
+    "AuditLog",
 ]

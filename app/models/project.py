@@ -10,8 +10,11 @@ from app.models.base import Base, Timestamped, TZDateTime, UUIDPk
 # Fixed, closed set — bounded by which integrations the platform actually implements
 # an adapter for. Not domain vocabulary, so it stays a native enum rather than an
 # ontology_terms row (see CUE-Tech-Stack.md §5 for that distinction).
+# "manual" (added alongside the audit trail / lifecycle work, migration
+# d05dce0f415d) is the one non-integration value: FR-LED-10's evidence for a
+# commitment entered by hand, not captured off a channel at all.
 ChannelType = Enum(
-    "whatsapp", "wechat", "teams", "outlook", "sharepoint", name="channel_type"
+    "whatsapp", "wechat", "teams", "outlook", "sharepoint", "manual", name="channel_type"
 )
 
 

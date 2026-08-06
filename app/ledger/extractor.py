@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.capture.fixtures import FixtureCase, ProjectContext
+from app.ledger.audit import record_audit_event
 from app.ledger.schema import (
     ExtractionResult,
     load_extraction_json_schema,
@@ -160,16 +161,28 @@ async def extract_case(
         await session.flush()  # need commitment.id for the evidence row below
 
         span_start = case["message"].index(item.evidence_span)
-        session.add(
-            Evidence(
-                commitment_id=commitment.id,
-                channel=case["channel"],
-                sent_at=_parse_timestamp(case["sent_at"]),
-                language=case["lang"],
-                original_text=case["message"],
-                span_start=span_start,
-                span_end=span_start + len(item.evidence_span),
-            )
+        evidence = Evidence(
+            commitment_id=commitment.id,
+            channel=case["channel"],
+            sent_at=_parse_timestamp(case["sent_at"]),
+            language=case["lang"],
+            original_text=case["message"],
+            span_start=span_start,
+            span_end=span_start + len(item.evidence_span),
+        )
+        session.add(evidence)
+        await session.flush()  # need evidence.id for the audit row below
+
+        # FR-LED-12: every ledger mutation, not only the REST-driven ones —
+        # actor_id=None since this write has no human behind it.
+        await record_audit_event(
+            session,
+            project_id=project_id,
+            commitment_id=commitment.id,
+            action="created",
+            actor_id=None,
+            to_state=commitment.state,
+            evidence_id=evidence.id,
         )
         created.append(commitment)
 
