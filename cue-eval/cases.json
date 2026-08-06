@@ -1,0 +1,186 @@
+{
+  "project_context": {
+    "project": "Meridian Group — ballroom activation",
+    "client": "Meridian Group",
+    "timezone": "Asia/Singapore",
+    "venue": "Ballroom, 138 rounds of 8, 1104 pax",
+    "build_up": ["2026-06-22", "2026-06-23"],
+    "event_days": ["2026-06-24", "2026-06-25", "2026-06-26"],
+    "doors": "2026-06-24T09:00:00+08:00",
+    "known_milestones": [
+      { "name": "Graphics test print approval", "due": "2026-05-31" },
+      { "name": "Final video assets loaded", "due": "2026-06-19" },
+      { "name": "LED screen install", "due": "2026-06-22T14:00:00+08:00" },
+      { "name": "Content load", "due": "2026-06-22T16:00:00+08:00" },
+      { "name": "Rehearsal", "due": "2026-06-22T18:00:00+08:00" }
+    ],
+    "vendors": [
+      { "party": "Ah Seng Production", "category": "AV" },
+      { "party": "Vertex Fabrication", "category": "fabrication" },
+      { "party": "Golden Palate", "category": "catering" },
+      { "party": "Lianhe Signage", "category": "signage" },
+      { "party": "Bloomworks", "category": "floristry" },
+      { "party": "Kim Seng Logistics", "category": "logistics" }
+    ]
+  },
+
+  "cases": [
+    {
+      "id": "T01",
+      "band": "easy",
+      "lang": "en",
+      "channel": "whatsapp",
+      "party": "Ah Seng Production",
+      "sent_at": "2026-06-22T09:38:00+08:00",
+      "message": "Morning Mei — screen install will be delayed 2 hrs, we'll start 4pm instead of 2pm. No change to cost.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "renegotiate", "due_at": "2026-06-22T16:00:00+08:00", "price_changed": false, "deliverable_contains": "screen" }
+        ]
+      }
+    },
+    {
+      "id": "T02",
+      "band": "easy",
+      "lang": "zh",
+      "channel": "wechat",
+      "party": "Vertex Fabrication",
+      "sent_at": "2026-05-14T11:20:00+08:00",
+      "message": "truss 报价出来了,一共 8,400 新币,包含运输和安装。",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "quote", "amount": 8400, "currency": "SGD", "deliverable_contains": "truss" }
+        ]
+      }
+    },
+    {
+      "id": "T03",
+      "band": "easy",
+      "lang": "en",
+      "channel": "whatsapp",
+      "party": "Lianhe Signage",
+      "sent_at": "2026-06-21T14:20:00+08:00",
+      "message": "Wayfinding signage proof approved and printed. All 12 panels delivered to the venue store this afternoon.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "confirm", "deliverable_contains": "signage" }
+        ]
+      }
+    },
+    {
+      "id": "T04",
+      "band": "easy",
+      "lang": "zh",
+      "channel": "wechat",
+      "party": "Golden Palate",
+      "sent_at": "2026-06-22T06:41:00+08:00",
+      "message": "菜单要改一下,牛油果那道换成蟹肉挞,加 680 新币,可以吗?",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "offer", "amount": 680, "currency": "SGD", "price_changed": true }
+        ]
+      }
+    },
+    {
+      "id": "T05",
+      "band": "code-switched",
+      "lang": "mixed",
+      "channel": "whatsapp",
+      "party": "Ah Seng Production",
+      "sent_at": "2026-06-20T17:05:00+08:00",
+      "message": "Boss 这个 LED screen 明天 install 好吗?我们 crew 早上 9 点到,大概 4 个小时 done。",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "offer", "due_at": "2026-06-21T09:00:00+08:00", "deliverable_contains": "LED" }
+        ]
+      }
+    },
+    {
+      "id": "T06",
+      "band": "code-switched",
+      "lang": "mixed",
+      "channel": "whatsapp",
+      "party": "Vertex Fabrication",
+      "sent_at": "2026-06-18T10:12:00+08:00",
+      "message": "The 铝架 for zone C is ready lah, can deliver 明天 morning 9am. Confirm?",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "offer", "due_at": "2026-06-19T09:00:00+08:00" }
+        ]
+      }
+    },
+    {
+      "id": "T07",
+      "band": "multi",
+      "lang": "en",
+      "channel": "whatsapp",
+      "party": "Kim Seng Logistics",
+      "sent_at": "2026-06-19T08:30:00+08:00",
+      "message": "Crates arriving 22 Jun 7am. Forklift booked for the same morning. We'll also need the loading bay cleared from 6:30am — can you sort that with the venue?",
+      "expect": {
+        "count": 3,
+        "commitments": [
+          { "act_type": "commit", "due_at": "2026-06-22T07:00:00+08:00", "deliverable_contains": "crate" },
+          { "act_type": "commit", "deliverable_contains": "forklift" },
+          { "act_type": "query" }
+        ]
+      }
+    },
+    {
+      "id": "T08",
+      "band": "multi",
+      "lang": "zh",
+      "channel": "wechat",
+      "party": "Bloomworks",
+      "sent_at": "2026-06-17T15:44:00+08:00",
+      "message": "花艺部分:主台的花明天下午送到,侧台的要后天。另外增加两个花柱,每个 450。",
+      "expect": {
+        "count": 3,
+        "commitments": [
+          { "act_type": "commit", "due_at": "2026-06-18" },
+          { "act_type": "commit", "due_at": "2026-06-19" },
+          { "act_type": "quote", "amount": 450 }
+        ]
+      }
+    },
+    {
+      "id": "T09",
+      "band": "ambiguous-date",
+      "lang": "en",
+      "channel": "whatsapp",
+      "party": "Vertex Fabrication",
+      "sent_at": "2026-06-11T16:02:00+08:00",
+      "sent_weekday": "Thursday",
+      "message": "We'll have the test print ready by next Tuesday.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "commit", "due_at": "2026-06-16" }
+        ]
+      },
+      "note": "Relative weekday resolution. Model must use sent_at + weekday from context."
+    },
+    {
+      "id": "T10",
+      "band": "ambiguous-date",
+      "lang": "zh",
+      "channel": "wechat",
+      "party": "Vertex Fabrication",
+      "sent_at": "2026-06-20T09:15:00+08:00",
+      "message": "后天早上把地毯铺好。",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "commit", "due_at": "2026-06-22" }
+        ]
+      },
+      "note": "后天 = day after tomorrow. Tests relative-date arithmetic in Chinese."
+    }
+  ]
+}

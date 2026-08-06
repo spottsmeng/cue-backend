@@ -5,7 +5,7 @@ from typing import TypedDict
 # cue-eval/README.md: "The same cases.json shape seeds a FixtureAdapter, so the
 # pipeline can be developed with no live channel." This is that adapter.
 # Loaded from disk, same as app/ledger/schema.py — one source, not a copy.
-_CUE_EVAL_DIR = Path(__file__).resolve().parents[3] / "cue-eval"
+_CUE_EVAL_DIR = Path(__file__).resolve().parents[2] / "cue-eval"
 
 
 class FixtureCase(TypedDict):

@@ -4,9 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-# The repo's cue-eval/ directory, sibling to backend/. Not a package import
-# (cue-eval is deliberately stdlib-only) — just a shared path on disk.
-_CUE_EVAL_DIR = Path(__file__).resolve().parents[3] / "cue-eval"
+# backend/cue-eval/. Not a package import (cue-eval is deliberately
+# stdlib-only) — just a shared path on disk.
+_CUE_EVAL_DIR = Path(__file__).resolve().parents[2] / "cue-eval"
 
 ActType = Literal[
     "offer", "commit", "confirm", "revoke", "renegotiate", "quote", "approve", "escalate", "query"

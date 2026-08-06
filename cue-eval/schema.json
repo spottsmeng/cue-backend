@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "commitments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "act_type": {
+            "type": "string",
+            "enum": ["offer", "commit", "confirm", "revoke", "renegotiate", "quote", "approve", "escalate", "query"]
+          },
+          "deliverable_en": { "type": "string" },
+          "deliverable_original": { "type": "string" },
+          "due_at": { "type": ["string", "null"] },
+          "amount": { "type": ["number", "null"] },
+          "currency": { "type": ["string", "null"] },
+          "price_changed": { "type": ["boolean", "null"] },
+          "evidence_span": { "type": "string" },
+          "confidence": { "type": "number" }
+        },
+        "required": ["act_type", "deliverable_en", "deliverable_original", "evidence_span", "confidence"]
+      }
+    }
+  },
+  "required": ["commitments"]
+}
