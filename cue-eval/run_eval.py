@@ -47,7 +47,13 @@ def build_prompt(case):
 
 
 # --------------------------------------------------------------- providers ---
-def post(url, payload, headers, timeout=180):
+def post(url, payload, headers, timeout=300):
+    # 300s, not the original 180s: the README's "8-25s per case" baseline is
+    # on warm local hardware (M3 Pro). A CPU-only cloud CI runner has no such
+    # guarantee even once the model is warm (see cue-eval.yml's warmup step
+    # for the separate, larger budget that covers the one-time cold-load
+    # cost specifically) — this just gives real per-case inference more room
+    # before deciding something is actually stuck.
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )

@@ -34,7 +34,10 @@ jobs:
   cue-eval:
     name: cue-eval vs qwen2.5:14b
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 10 min warmup budget + up to 300s/case * 10 cases for the eval itself,
+    # plus install/pull — give the script's own timeouts room to be the
+    # thing that fires, not this outer job-level ceiling.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -68,13 +71,32 @@ jobs:
       - name: Pull qwen2.5:14b
         run: ollama pull qwen2.5:14b
 
+      - name: Warm up the model
+        # `ollama pull` only downloads the weights — it doesn't load them into
+        # memory. On a cold, CPU-only, resource-constrained runner (unlike a
+        # warm local Ollama on real hardware), the first inference call also
+        # pays a one-off load-into-RAM cost, which blew past run_eval.py's
+        # per-request timeout on the very first eval case here. Paying that
+        # cost once, up front, with its own generous timeout, keeps it off
+        # the eval's per-case budget. keep_alive matches call_ollama's own
+        # "2h" so the model stays resident for the whole eval run after this.
+        run: |
+          curl -sf http://localhost:11434/api/generate \
+            --max-time 600 \
+            -d '{"model":"qwen2.5:14b","prompt":"hi","stream":false,"keep_alive":"2h"}' \
+            > /dev/null
+
       - name: Run cue-eval
         working-directory: cue-eval
         env:
           RUNS: ${{ github.event.inputs.runs || '1' }}
           BAND: ${{ github.event.inputs.band || '' }}
         run: |
-          set -eu
+          # pipefail matters here: without it, `python3 ... | tee ...` always
+          # reports success (tee's exit code) even if run_eval.py crashes —
+          # exactly what silently happened on the first real run of this
+          # workflow. Caught by reading the raw log, not by the green check.
+          set -euo pipefail
           extra_args=()
           if [ -n "$BAND" ]; then extra_args+=(--band "$BAND"); fi
           {
