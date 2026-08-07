@@ -16,6 +16,15 @@ from app.twin.models import (
     TwinAuditLog,
 )
 from app.documents.models import Document, DocumentAuditLog, DocumentVersion, SpecClaim
+from app.foresight.models import (
+    Deviation,
+    ForesightAuditLog,
+    ForesightThreshold,
+    Notification,
+    QuietHoursConfig,
+    Risk,
+    WebhookSubscription,
+)
 
 __all__ = [
     "Base",
@@ -46,4 +55,11 @@ __all__ = [
     "DocumentVersion",
     "SpecClaim",
     "DocumentAuditLog",
+    "Risk",
+    "Deviation",
+    "Notification",
+    "WebhookSubscription",
+    "ForesightThreshold",
+    "QuietHoursConfig",
+    "ForesightAuditLog",
 ]

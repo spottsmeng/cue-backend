@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, time
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +40,16 @@ EvidenceChannelLiteral = Literal["whatsapp", "wechat", "teams", "outlook", "shar
 
 # Mirrors app/documents/models.py's SpecClaimAttribute native enum.
 SpecClaimAttributeLiteral = Literal["dimension", "finish", "quantity", "price"]
+
+# Mirrors app/foresight/models.py's native enums (PRD §6.9/§6.7/§6.15).
+RiskSourceLiteral = Literal["silence", "contradiction", "forecast"]
+RiskSeverityLiteral = Literal["low", "medium", "high", "critical"]
+RiskStatusLiteral = Literal["open", "acknowledged", "resolved", "superseded"]
+DeviationStatusLiteral = Literal["auto_drafted", "confirmed", "resolved"]
+NotificationChannelLiteral = Literal["webhook", "push", "email", "teams"]
+ForesightThresholdMetricLiteral = Literal[
+    "silence_multiplier", "escalation_hours", "forecast_slack_days"
+]
 
 
 class MembershipCreate(BaseModel):
@@ -571,3 +581,170 @@ class DocumentSearchResult(BaseModel):
     document: DocumentOut
     version: DocumentVersionOut
     rank: float
+
+
+# --- Foresight (PRD §6.9 FR-FOR / §6.7 FR-DEV / §6.15 FR-NTF) -----------
+
+
+class RiskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    source: RiskSourceLiteral
+    finding_key: str
+    severity: RiskSeverityLiteral
+    status: RiskStatusLiteral
+    commitment_id: uuid.UUID | None
+    milestone_id: uuid.UUID | None
+    spec_claim_id: uuid.UUID | None
+    downstream_consequence: str
+    base_rate: float | None
+    detail: dict
+    acknowledged_by: uuid.UUID | None
+    acknowledged_at: datetime | None
+    resolved_at: datetime | None
+    escalated_to_role: MembershipRoleLiteral | None
+    escalated_at: datetime | None
+    superseded_by: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DeviationOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    class_term_id: uuid.UUID
+    status: DeviationStatusLiteral
+    description_en: str
+    risk_id: uuid.UUID | None
+    commitment_id: uuid.UUID | None
+    milestone_id: uuid.UUID | None
+    resolution_date: datetime | None
+    resolution_owner: uuid.UUID | None
+    confirmed_by: uuid.UUID | None
+    confirmed_at: datetime | None
+    detail: dict
+    created_at: datetime
+    updated_at: datetime
+    evidence: list[EvidenceOut]
+
+
+class DeviationCreate(BaseModel):
+    """FR-DEV-01: manual entry. `original_text` is the caller's own
+    account of the deviation — becomes this row's required Evidence, same
+    "manually-entered-but-fully-real" posture FR-LED-10 established for
+    CommitmentCreate."""
+
+    class_code: str
+    description_en: str
+    commitment_id: uuid.UUID | None = None
+    milestone_id: uuid.UUID | None = None
+    original_text: str
+
+
+class DeviationConfirmRequest(BaseModel):
+    """FR-DEV-04's "PM confirms or edits" — an empty body confirms the
+    auto-drafted row as-is; `description_en` set corrects it, mirroring
+    VerifyRequest's corrections-optional shape. Doubles as this resource's
+    "update" verb for an already-confirmed row (item 7) — there is no
+    separate PATCH endpoint, since a confirm-with-corrections call already
+    covers editing either kind of row identically."""
+
+    description_en: str | None = None
+
+
+class DeviationResolveRequest(BaseModel):
+    resolution_date: datetime
+    resolution_owner: uuid.UUID
+
+
+class NotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    recipient_id: uuid.UUID
+    risk_id: uuid.UUID | None
+    deviation_id: uuid.UUID | None
+    commitment_id: uuid.UUID | None
+    collapsed_risk_ids: list[uuid.UUID]
+    collapsed_count: int
+    severity: RiskSeverityLiteral
+    downstream_consequence: str
+    deliverable_at: datetime
+    delivered_via: NotificationChannelLiteral | None
+    sent_at: datetime | None
+    acknowledged_by: uuid.UUID | None
+    acknowledged_at: datetime | None
+    created_at: datetime
+    detail: dict
+
+
+class WebhookSubscriptionOut(BaseModel):
+    """Never carries `secret` — shown exactly once, at creation
+    (WebhookSubscriptionCreated below), same "shown once" posture an API
+    key would get; a lost secret means re-creating the subscription, not
+    an endpoint that could leak it back out later."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    url: str
+    event_types: list[str]
+    active: bool
+    created_by: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+class WebhookSubscriptionCreated(WebhookSubscriptionOut):
+    secret: str
+
+
+class WebhookSubscriptionCreate(BaseModel):
+    url: str
+    event_types: list[Literal["commitment", "risk", "deviation"]] = Field(min_length=1)
+
+
+class ForesightThresholdOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organisation_id: uuid.UUID
+    project_id: uuid.UUID | None
+    deviation_class_term_id: uuid.UUID | None
+    metric: ForesightThresholdMetricLiteral
+    value: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class ForesightThresholdCreate(BaseModel):
+    project_id: uuid.UUID | None = None
+    deviation_class_term_id: uuid.UUID | None = None
+    metric: ForesightThresholdMetricLiteral
+    value: float
+
+
+class ForesightThresholdUpdate(BaseModel):
+    value: float
+
+
+class QuietHoursConfigOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    quiet_start_local: time
+    quiet_end_local: time
+    critical_severity_threshold: RiskSeverityLiteral
+    created_at: datetime
+    updated_at: datetime
+
+
+class QuietHoursConfigWrite(BaseModel):
+    quiet_start_local: time
+    quiet_end_local: time
+    critical_severity_threshold: RiskSeverityLiteral = "critical"

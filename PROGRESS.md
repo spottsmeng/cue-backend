@@ -14,7 +14,7 @@ there yet.
 | M1 | Production Twin | `Prompt 4 — Production Twin.txt` | §15 Phase 3 | Ledger (done) | Done (2026-08-07) |
 | M2 | Governance completion | `Prompt 5 — Governance completion.txt` | §15 Phase 9 (remainder) | Identity/RBAC (done) | Done (2026-08-07) |
 | M3 | Documents | `Prompt 6 — Documents.txt` | §15 Phase 8 | — | Done (2026-08-07) |
-| M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Not started |
+| M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Done (2026-08-08) |
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Not started |
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Not started |
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Not started |
@@ -92,9 +92,10 @@ passes; superseded first-pass decisions are not listed separately.
 - FR-TWN-08 (learned duration distributions) is unimplemented, deliberately — see `CUE-PRD.md` §6.8's
   own paragraph on why, and don't build a fabricated distribution to make it look done when a future
   session gets here with real project history to learn from.
-- Foresight (M4) can now read `app/twin/service.py`'s `compute_current`/`compute_propagation` for
-  slack, critical path and hypothetical impact — it does not yet *decide* anything from them
-  (FR-LCY-02/03's automatic `committed → at_risk` / `at_risk → broken` transitions are still M4's job).
+- Foresight (M4, now Done — see its own notes below) reads `app/twin/service.py`'s
+  `compute_current`/`compute_propagation` for slack, critical path and hypothetical impact, and is
+  what finally *decides* FR-LCY-02/03's automatic `committed → at_risk` / `at_risk → broken`
+  transitions from that data.
 
 ### M2 notes for later sessions
 
@@ -277,13 +278,122 @@ which no demo shortcut changes.
   session: "nothing consumes this value yet"; still true). The audit trail is retained intact —
   archiving never deletes or mutates any prior `audit_log`/`twin_audit_log`/`document_audit_log` row.
 - **Contradiction/spec-drift detection that *compares* spec claims across documents is not built** —
-  `SpecClaim.contradicts` exists (per §4.3's schema) but nothing populates it yet; that's Foresight
-  (Prompt 7), which depends on this milestone's `SpecClaim` table existing and now can proceed.
+  `SpecClaim.contradicts` existed (per §4.3's schema) but nothing populated it yet as of this
+  session; Foresight (M4, now Done) is what populates it — see that milestone's own notes below.
 - **`/admin/export/{project_id}`'s bundle (`app/api/admin.py`) still skips documents** — its own
   comment already flagged this ("Documents skipped this session — that milestone doesn't exist yet
   ... add a `documents` key/CSV once it does"). M3 exists now; adding that key is a genuine, narrow
   follow-up for whichever future session touches `admin.py` next, not done here since Prompt 6 never
   named it as this session's job.
+
+### M4 notes for later sessions
+
+Closed FR-FOR-01 through 10 except FR-FOR-05 (photo verification — genuinely out of scope, per
+Prompt 7's own EXPLICITLY OUT OF SCOPE section: needs real onsite photo capture and an object
+store's image-matching capability that doesn't exist yet), FR-DEV-01 through 05, FR-NTF-01 through
+05 except real push/email/Teams delivery (deferred to M8/M10), and FR-LCY-02/03 (the automatic
+`committed → at_risk` / `at_risk → broken` transitions every earlier session left structurally
+permitted but never wired to fire).
+
+- **New module `app/foresight/`** — models, audit, threshold, risk (the shared dedup/supersede
+  helper), silence, contradiction, forecast, deviation, escalation, notification, config, worker,
+  schema, consequence — same per-domain-module-owns-its-models precedent `app/twin/` and
+  `app/documents/` already established. Prompt 7's own instruction named the exact path
+  (`app/foresight/models.py`, not `app/models/foresight.py`), consistent with that precedent.
+- **`app/foresight/risk.py`'s `create_or_supersede_risk` is the single FR-FOR-10 dedup/supersede
+  helper** every detector calls — silence.py, contradiction.py and forecast.py all go through it
+  rather than three ad hoc checks, per the prompt's own explicit instruction. An existing *open*
+  Risk for the same `(project_id, source, finding_key)` with no material change (severity/
+  consequence/base_rate/detail all identical) is a no-op, not a duplicate insert; a materially
+  different one retires the old row (`status='superseded'`, `superseded_by`) and inserts a fresh
+  one, preserving history rather than mutating it in place.
+- **Silence Radar's baseline is scoped to this project's own history with the vendor**, not the
+  vendor's history across every project in the org — simpler to reason about and test; widening the
+  sample once there's demand for it (a vendor genuinely fresh to one project but well-known
+  elsewhere in the org) is a documented, deliberate follow-on, not an oversight
+  (`app/foresight/silence.py`'s own module docstring).
+- **Forecasting is a documented heuristic, not a learned model** (FR-FOR-06, same "no historical
+  corpus yet" situation FR-TWN-08 already documented for the Twin): a milestone at or below the
+  project's configured `forecast_slack_days` threshold, combined with either zero/negative slack on
+  its own or an open Silence Radar flag on a commitment feeding it, is treated as high
+  miss-likelihood. `Risk.base_rate` is always left `None` on a forecast-sourced Risk — that field is
+  Silence Radar's own FR-FOR-02 requirement, and fabricating one here would be exactly the dishonest
+  precision CLAUDE.md's Models table forbids. **Fixed milestones are excluded from the forecast scan
+  entirely** — a fixed node's slack is definitionally zero (`app/twin/graph.py`'s forward/backward
+  pass), the same reason that module's own `_binding_constraint` already excludes fixed nodes from
+  candidacy; without this exclusion every fixed milestone in every project would trivially "forecast
+  a miss" on every single scan (caught by writing the test for it, not by inspection).
+- **`app/ledger/lifecycle.py` gained `apply_automatic_transition`** — the single execution primitive
+  for FR-LCY-02/03, called by silence.py (`committed → at_risk` on silence), forecast.py (the same
+  transition on forecast breach, and `at_risk → broken` on due-time-passed via
+  `scan_overdue_commitments`). Reuses the exact write path `app/api/commitments.py`'s
+  `transition_commitment` already established (`validate_transition`, set state, `record_audit_event`
+  with `actor_id=None`, `recompute_on_commitment_transition`) rather than a parallel one. The
+  commitment-state-machine DB trigger (migration `d05dce0f415d`) already permitted both transitions
+  structurally — no schema change was needed there, only the orchestration to actually fire them.
+- **Escalation (FR-FOR-08) is a periodic reconciliation sweep, not a Temporal workflow** —
+  CUE-Tech-Stack.md §2.4 names Temporal for durable "escalation chains... human-in-the-loop flows,"
+  but this session deliberately doesn't add it: a second, heavier piece of infrastructure this
+  milestone's actual scope doesn't need, the same "no new infrastructure dependency needed at this
+  scale" call `app/twin/graph.py`'s own module docstring already makes for a comparable tradeoff.
+  `ESCALATION_CHAIN = ("project_manager", "producer", "administrator")` is a new, Foresight-local
+  seniority ordering — `app/identity/service.py` has no role-hierarchy concept at all (only flat
+  "does user X hold role Y"), so this doesn't extend that module, it reuses its underlying
+  Membership/Delegation data model (delegation-aware routing) without inventing a new permission
+  concept, per the prompt's own instruction.
+- **This is the first session with a scheduled/background job** — `app/foresight/worker.py`, a real
+  [arq](https://arq-docs.helpmanual.io/) worker connected to a new `valkey` docker-compose service
+  (CUE-Tech-Stack.md §2.4: "Lightweight task queue — arq (Valkey-backed)"). Its one cron job,
+  `run_foresight_sweep` (15-minute schedule), is a plain async function with no queue-specific
+  dependency on its `ctx` argument, so it's directly callable by tests (and ops scripts) without a
+  running worker or broker at all — confirmed with a real Valkey round-trip
+  (`tests/test_foresight_worker.py`), not mocked. Project discovery (which projects exist, across
+  every org) is the one deliberate RLS bypass in the codebase outside of test/script setup — connects
+  as the schema-owner role, same as `tests/conftest.py`'s `owner_engine` and
+  `scripts/extract_fixtures.py`, because there is still no service-account/agent identity in this
+  codebase (M2's own notes: "a placeholder until that identity model exists"). Every actual read/
+  write for a discovered project still runs through the ordinary RLS-enforced session with that
+  project's own org context set.
+- **Notification's only real delivery adapter is webhook** (`app/foresight/notification.py`'s
+  `deliver_webhook`/`deliver_due_notifications`) — HMAC-SHA256-signed real HTTP POSTs to registered
+  `WebhookSubscription` rows, brought forward the same way Documents' Prompt 6 session built a real
+  SharePoint write-back ahead of its own original schedule. Push/email/Teams remain deferred to
+  M8/M10 as Prompt 7 names — `Notification.delivered_via` has all four values in its enum, only
+  `"webhook"` has a real sender.
+- **Quiet hours (FR-NTF-04) are configured per-project, not per-user** — `QuietHoursConfig`, one row
+  per project, local to `Project.timezone`; a project's operational rhythm (don't page anyone
+  overnight) read as a team-wide property, the same tier `Project.timezone` itself already is. The
+  "live-event window" override reuses `Project.event_start`/`event_end` directly rather than a
+  second declared-window column — that pair already *is* the project's own declared live-event
+  window.
+- **`ForesightThreshold` (FR-FOR-07) extends `RetentionPolicy`'s "axis, axis, value; NULL broadens"
+  config-table pattern** (org × vertical × region there; org × project × deviation_class here) —
+  same `/admin/*`, `require_org_administrator`-gated shape `app/api/retention.py` already
+  establishes, per Prompt 7's own explicit instruction not to invent a parallel mechanism.
+  `DEFAULT_THRESHOLDS` (`app/foresight/threshold.py`) are the documented, honest fallback values used
+  before a PM ever configures a row — not fabricated precision.
+- **`deviation_class` ontology terms are seeded vertical-scoped (event-production) from the start**,
+  not universal-core the way `commitment_act`/`milestone_type` originally were — `milestone_type`
+  later needed a whole re-key migration (`eed5a4da79f6`) once a second vertical became roadmap-real,
+  and `b32b62ca45e4`'s own comment already flagged `deviation_class` specifically as
+  "construction-adjacent" (the same collision risk). `seed_data/deviation_classes.py` +
+  migration `ab0dc47865c9`; `tests/conftest.py`'s `_reseed_universal_ontology_terms` was extended
+  with the same vertical-scoped INSERT shape `MILESTONE_TYPES` already needed.
+- **`evidence`'s exactly-one-subject CHECK widened from 4 to 5** (migration `45309b1d751f`, same
+  shape `f3a1c9d7e4b2` used to widen it from 2 to 4) — `Deviation` gets the same evidence-required
+  deferred-constraint-trigger mechanism as Commitment/Budget/DocumentVersion/SpecClaim (FR-DEV-02).
+- **`app/api/deviations.py`'s `POST .../{id}/confirm` doubles as this resource's "update" verb** —
+  item 7 lists "list · create · update · resolve"; there is no separate PATCH endpoint, since a
+  confirm-with-corrections call already covers editing either an auto-drafted or an already-confirmed
+  row identically (mirrors `app/api/commitments.py`'s `verify_commitment` two-step shape exactly).
+- **`WebhookSubscription.secret` is shown exactly once**, in the create response
+  (`WebhookSubscriptionCreated`) — never re-exposed by list/read afterward, same posture an API key
+  would get.
+- Full new-endpoint RLS + role-gating coverage (both properties, independently, per Prompt 7's own
+  testing expectation): `tests/test_risks_api.py`, `test_deviations_api.py`, `test_webhooks_api.py`,
+  `test_foresight_thresholds_api.py`. Escalation routing extends `tests/test_delegation.py`'s own
+  `_member`/`_bare_user` fixture shape with a real `Delegation` row, proving delegation-aware routing
+  (not just membership-based) end to end — `tests/test_foresight_escalation.py`.
 
 **Already done, before this table existed** (the deterministic audit this plan is built on found
 these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle state machine, audit

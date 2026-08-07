@@ -10,7 +10,7 @@ for the extraction-tuning discipline.
 
 ```bash
 cp .env.example .env
-docker compose up -d --wait   # Postgres, with the cue_app role provisioned
+docker compose up -d --wait   # Postgres, MinIO, Valkey, with the cue_app role provisioned
 uv sync
 uv run pytest                 # against a real cue_test database
 ```
@@ -53,8 +53,44 @@ uv run fastapi dev main.py
 | `app/ledger/` | Extraction: prompt/schema loading, code-level evidence verification |
 | `app/models/` | SQLAlchemy models (RLS-enforced, multi-tenant) |
 | `app/capture/` | Fixture-based message capture (stand-in until real channel capture ships) |
+| `app/twin/` | Production Twin (PRD §6.8): CPM slack/critical-path, archetype seeding, hypothetical-shift propagation |
+| `app/documents/` | Documents (PRD §6.6): versioned storage, OCR/parsing stand-in, spec-claim extraction |
+| `app/foresight/` | Foresight (PRD §6.9/§6.7/§6.15): Silence Radar, contradiction/spec-drift detection, forecast heuristic, escalation, Deviations, notification core — see its own section below |
 | `cue-eval/` | Extraction prompt/schema tuning harness — see its own README |
 | `scripts/extract_fixtures.py` | Runs cue-eval's fixture cases through the real pipeline |
+
+## Background jobs (arq + Valkey)
+
+Foresight (Prompt 7) is the first milestone that needs a scheduled/background job — Silence
+Radar, forecasting, the FR-LCY-02/03 automatic lifecycle transitions, escalation and
+notification delivery all have to run periodically, not just on request. `app/foresight/worker.py`
+is an [arq](https://arq-docs.helpmanual.io/) worker (CUE-Tech-Stack.md §2.4: "Lightweight task
+queue — arq (Valkey-backed)"), connected to the `valkey` service `docker compose up` already
+starts (same health-checked, named-volume shape as `postgres`/`minio` — see `docker-compose.yml`).
+
+Run the worker locally:
+
+```bash
+uv run arq app.foresight.worker.WorkerSettings
+```
+
+It registers one cron job, `run_foresight_sweep`, on a 15-minute schedule — for every
+non-archived project across every organisation, in order: Silence Radar, contradiction/spec-drift
+detection, the forecast heuristic, the FR-LCY-03 due-time-passed sweep, escalation, and webhook
+delivery of any notification past its `deliverable_at` (FR-NTF-04). `run_foresight_sweep` is a
+plain async function with no queue-specific dependency on its `ctx` argument, so it's also directly
+callable — by tests, or a one-off ops invocation — without a running worker or broker at all.
+
+Connection settings (`app/foresight/config.py`'s `ArqSettings`) default to `docker-compose.yml`'s
+`valkey` service (`localhost:6379`) and are overridable via `CUE_ARQ_REDIS_HOST`/`CUE_ARQ_REDIS_PORT`,
+same env-prefixed-settings shape as `app/documents/config.py`'s `StorageSettings`.
+
+**Escalation note**: CUE-Tech-Stack.md §2.4 names Temporal, not arq, for durable "escalation
+chains... long-running, resumable, human-in-the-loop flows." This session deliberately does not
+add Temporal — a second, heavier piece of infrastructure this milestone's actual scope doesn't
+need — in favour of a periodic reconciliation sweep (`app/foresight/escalation.py`), which is
+sufficient at this scale. Revisit if/when escalation needs genuinely durable, multi-day workflow
+state a stateless sweep can't express.
 
 ## CI
 

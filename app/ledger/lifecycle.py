@@ -22,13 +22,28 @@ there is no reason to settle for one layer here. The two tables below must be
 kept in sync by hand; the migration's SQL carries a comment pointing back to
 this file, and vice versa.
 
-Out of scope this session (PRD §6.5's FR-LCY-02/03/04/05): automatic
-transitions from silence/upstream-slip/forecast-breach, the delivered-only-
-on-evidence gate, and PM notification — those depend on Twin/Foresight
-infrastructure that doesn't exist yet. This module only validates that a
-requested transition is *structurally* permitted; it does not decide whether
-one *should* happen.
+FR-LCY-02/03 (automatic committed -> at_risk / at_risk -> broken) were out of
+scope for every session before Foresight (Prompt 7) — they depend on Twin/
+Foresight infrastructure that didn't exist yet. Foresight is what finally
+makes them real: apply_automatic_transition, below, is what *executes* one
+once a detector (app/foresight/silence.py, forecast.py) has *decided* one
+should happen. This module's own validator still only answers "is this
+transition structurally permitted" — deciding whether one *should* happen
+for a given commitment stays Foresight's job, not this module's; see each
+detector's own docstring for its trigger logic (FR-LCY-04's delivered-only-
+on-evidence gate and FR-LCY-05's PM notification remain separately scoped —
+delivered already requires evidence structurally via Commitment's own
+evidence requirement, and FR-LCY-05's notification is
+app/foresight/notification.py's job, not this module's).
 """
+
+import uuid
+from typing import TYPE_CHECKING
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from app.models import Commitment
 
 # proposed --> proposed ("renegotiate terms", per the PRD's state diagram) is
 # a genuine self-loop, not an omission — new terms on an unaccepted proposal
@@ -55,3 +70,56 @@ def validate_transition(from_state: str, to_state: str) -> None:
         raise InvalidTransition(
             f"{from_state!r} -> {to_state!r} is not a permitted commitment transition (PRD §6.5)"
         )
+
+
+async def apply_automatic_transition(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    commitment: "Commitment",
+    to_state: str,
+    trigger: str,
+    detail: dict | None = None,
+) -> None:
+    """FR-LCY-02/03: executes an automatic transition a Foresight detector
+    has already decided should happen — reuses the exact write path
+    app/api/commitments.py's transition_commitment uses for a manual one
+    (validate_transition, set state, audit, recompute the Twin), so a
+    Foresight-triggered transition is indistinguishable in shape from a
+    human-triggered one except for `actor_id=None` (app/ledger/audit.py's
+    established "this write has no human behind it" convention,
+    app/ledger/extractor.py's own precedent) and the `trigger` string
+    recorded in the audit detail, naming *why* (FR-LCY-05 needs this to
+    explain the transition to the owning PM).
+
+    Imports app.ledger.audit / app.twin.service locally, not at module
+    level — this module is otherwise dependency-free (its own docstring:
+    "no ORM/session/network dependency"), and importing at call time avoids
+    making every caller of validate_transition/TRANSITIONS (including the
+    DB-trigger-comment cross-reference this docstring itself makes) pull in
+    the ORM layer just to use the pure state table.
+
+    Does not commit — caller (the detector's scan function) owns the
+    transaction boundary.
+    """
+    from app.ledger.audit import record_audit_event
+    from app.twin.service import recompute_on_commitment_transition
+
+    from_state = commitment.state
+    validate_transition(from_state, to_state)
+    commitment.state = to_state
+    await session.flush()  # the DB trigger checks this too — defense in depth, see module docstring
+
+    await record_audit_event(
+        session,
+        project_id=project_id,
+        commitment_id=commitment.id,
+        action="state_transition",
+        actor_id=None,
+        from_state=from_state,
+        to_state=to_state,
+        detail={"trigger": trigger, **(detail or {})},
+    )
+    await recompute_on_commitment_transition(
+        session, project_id=project_id, commitment=commitment, to_state=to_state, actor_id=None,
+    )

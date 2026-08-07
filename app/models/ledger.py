@@ -139,8 +139,9 @@ class Commitment(Base, UUIDPk, Timestamped):
 
 class Evidence(Base, UUIDPk):
     """PRD §4.3. Belongs to exactly one of {commitment, budget, document
-    version, spec claim} — enforced by the CHECK constraint below, and is
-    what the deferred trigger on each owning table checks for existence of.
+    version, spec claim, deviation} — enforced by the CHECK constraint below,
+    and is what the deferred trigger on each owning table checks for
+    existence of.
 
     `document_version_id` / `spec_claim_id` were added in the Documents
     session (Prompt 6) — extending this same shared table rather than giving
@@ -148,13 +149,16 @@ class Evidence(Base, UUIDPk):
     (channel/sent_at/language/original_text/span for a captured message, or
     the "manual" channel for FR-LED-10-style caller-supplied provenance).
     See app/documents/models.py's own module docstring for why.
+    `deviation_id` was added the same way in the Foresight session
+    (Prompt 7) — see app/foresight/models.py's Deviation docstring.
     """
 
     __tablename__ = "evidence"
     __table_args__ = (
         CheckConstraint(
             "(commitment_id IS NOT NULL)::int + (budget_id IS NOT NULL)::int "
-            "+ (document_version_id IS NOT NULL)::int + (spec_claim_id IS NOT NULL)::int = 1",
+            "+ (document_version_id IS NOT NULL)::int + (spec_claim_id IS NOT NULL)::int "
+            "+ (deviation_id IS NOT NULL)::int = 1",
             name="evidence_exactly_one_subject",
         ),
     )
@@ -170,6 +174,15 @@ class Evidence(Base, UUIDPk):
     )
     spec_claim_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("spec_claims.id"), default=None, index=True
+    )
+    # Added in the Foresight session (Prompt 7) — FR-DEV-02's "attach
+    # supporting evidence ... to each deviation" is the same
+    # "verified-in-code-not-trusted" evidence discipline as every other
+    # subject on this table, so it extends the shared table rather than
+    # Deviation inventing its own (app/foresight/models.py's Deviation
+    # docstring).
+    deviation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("deviations.id"), default=None, index=True
     )
 
     message_id: Mapped[uuid.UUID | None] = mapped_column(

@@ -22,6 +22,7 @@ from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.identity.tokens import mint_local_token
 from app.models import Base, Organisation, Party, Project
+from seed_data.deviation_classes import DEVIATION_CLASSES
 from seed_data.event_production_archetype import ARCHETYPE_CODE, ARCHETYPE_DEPENDENCIES, ARCHETYPE_ITEMS, ARCHETYPE_NAME
 from seed_data.verticals import PLATFORM_VERTICALS
 
@@ -122,6 +123,13 @@ PHASES = [
     ("bump_out", "Bump-out (teardown)", "拆场"),
     ("reconciliation", "Reconciliation", "结算"),
 ]
+
+# Mirrors alembic/versions/ab0dc47865c9's seed (Prompt 7, Foresight) — same
+# deliberate duplication rationale as COMMITMENT_ACTS/MILESTONE_TYPES/
+# DELIVERABLE_CLASSES/PHASES above. Vertical-scoped (event-production), same
+# reasoning MILESTONE_TYPES already needs the vertical_id subquery for.
+# app/foresight/models.py's Deviation.class_term_id needs these present for
+# any test that exercises deviation drafting/creation with a class code.
 
 
 async def _ensure_test_database() -> None:
@@ -316,6 +324,21 @@ async def _reseed_universal_ontology_terms(conn) -> None:
         [
             {"code": code, "label_en": label_en, "label_zh": label_zh, "sort_order": i}
             for i, (code, label_en, label_zh) in enumerate(PHASES)
+        ],
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO ontology_terms "
+            "(id, category, code, label_en, label_zh, vertical_id, sort_order, active, effective_from, version) "
+            "VALUES (gen_random_uuid(), 'deviation_class', :code, :label_en, :label_zh, "
+            "(SELECT id FROM verticals WHERE code = :vertical_code), :sort_order, true, now(), 1)"
+        ),
+        [
+            {
+                "code": code, "label_en": label_en, "label_zh": label_zh, "sort_order": i,
+                "vertical_code": EVENT_PRODUCTION_VERTICAL_CODE,
+            }
+            for i, (code, label_en, label_zh) in enumerate(DEVIATION_CLASSES)
         ],
     )
 

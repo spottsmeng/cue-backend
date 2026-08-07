@@ -48,6 +48,26 @@ services:
       timeout: 3s
       retries: 30
 
+  # app/foresight/worker.py's arq WorkerSettings needs a Redis-protocol
+  # broker for its job queue (CUE-Tech-Stack.md §2.4: "Lightweight task
+  # queue — arq (Valkey-backed)") — genuinely new infrastructure this
+  # session introduces (Foresight, Prompt 7, is the first milestone that
+  # needs a scheduled/background job at all; confirmed no queue/cache
+  # service existed in this file before now). Same health-checked-named-
+  # volume shape as postgres/minio above.
+  valkey:
+    image: valkey/valkey:8
+    ports:
+      - "6379:6379"
+    volumes:
+      - cue_valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   cue_postgres_data:
   cue_minio_data:
+  cue_valkey_data:
