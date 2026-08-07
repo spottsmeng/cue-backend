@@ -21,19 +21,30 @@ jobs:
       CUE_APP_DB_PASSWORD: cue_app
 
     steps:
-      - uses: actions/checkout@v4
+      # v4 ran on the now-deprecated Node 20 runtime; v5+ runs on Node 24.
+      # actions/checkout still publishes floating major tags, unlike
+      # setup-uv below, so a plain major-version pin is fine here.
+      - uses: actions/checkout@v7
 
       - name: Install uv
         # No `with:` block: this action's only Python-version input is a
         # literal `python-version` string, not a file reference — there is
-        # no python-version-file input on setup-uv@v5 (confirmed against its
+        # no python-version-file input on setup-uv (confirmed against its
         # own action.yml), so the previous attempt to pass one was silently
         # ignored by the action (a harmless but noisy "unexpected input"
         # warning on every run). Nothing to replace it with, either: `uv
         # sync` below already reads .python-version on its own, with zero
         # configuration — that's uv's native behaviour, independent of
         # anything this step does.
-        uses: astral-sh/setup-uv@v5
+        #
+        # Pinned to the exact patch version, not a floating major tag: as of
+        # v8, setup-uv deliberately stopped publishing `@v9`/`@v9.0`-style
+        # tags at all (a supply-chain-security hardening, referencing the
+        # 2025 tj-actions incident in its own release notes) — only the
+        # exact `v9.0.0` tag (or a pinned commit SHA, if you want to go
+        # further) resolves. v7 is also where this action moved off the
+        # deprecated Node 20 runtime onto Node 24.
+        uses: astral-sh/setup-uv@v9.0.0
 
       - name: Install dependencies
         run: uv sync
