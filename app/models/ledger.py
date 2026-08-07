@@ -22,10 +22,12 @@ VerificationState = Enum(
 )
 PaymentStatus = Enum("unpaid", "invoiced", "paid", name="payment_status")
 
-# Scope note: Meeting, Document, Dependency, Risk, Deviation and Membership
-# (PRD §4.1) are not modelled in this pass — they belong to later build phases
-# (Twin, Documents, Governance). This file covers the Ledger core: Commitment,
-# Evidence, Deliverable, Milestone, Budget.
+# Scope note: Meeting, Risk and Deviation (PRD §4.1) are not modelled in this
+# pass — they belong to later build phases. Dependency lives in
+# app/twin/models.py; Document/DocumentVersion/SpecClaim live in
+# app/documents/models.py (both own-module precedents this file's Evidence
+# class straddles, since it's referenced by all of them). This file covers
+# the Ledger core: Commitment, Evidence, Deliverable, Milestone, Budget.
 
 
 class Milestone(Base, UUIDPk, Timestamped):
@@ -136,14 +138,23 @@ class Commitment(Base, UUIDPk, Timestamped):
 
 
 class Evidence(Base, UUIDPk):
-    """PRD §4.3. Belongs to exactly one of {commitment, budget} — enforced by the
-    CHECK constraint below, and is what the deferred trigger on the owning table
-    checks for existence of."""
+    """PRD §4.3. Belongs to exactly one of {commitment, budget, document
+    version, spec claim} — enforced by the CHECK constraint below, and is
+    what the deferred trigger on each owning table checks for existence of.
+
+    `document_version_id` / `spec_claim_id` were added in the Documents
+    session (Prompt 6) — extending this same shared table rather than giving
+    either domain its own, since both need exactly the shape already here
+    (channel/sent_at/language/original_text/span for a captured message, or
+    the "manual" channel for FR-LED-10-style caller-supplied provenance).
+    See app/documents/models.py's own module docstring for why.
+    """
 
     __tablename__ = "evidence"
     __table_args__ = (
         CheckConstraint(
-            "(commitment_id IS NOT NULL)::int + (budget_id IS NOT NULL)::int = 1",
+            "(commitment_id IS NOT NULL)::int + (budget_id IS NOT NULL)::int "
+            "+ (document_version_id IS NOT NULL)::int + (spec_claim_id IS NOT NULL)::int = 1",
             name="evidence_exactly_one_subject",
         ),
     )
@@ -153,6 +164,12 @@ class Evidence(Base, UUIDPk):
     )
     budget_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("budgets.id"), default=None, index=True
+    )
+    document_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_versions.id"), default=None, index=True
+    )
+    spec_claim_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("spec_claims.id"), default=None, index=True
     )
 
     message_id: Mapped[uuid.UUID | None] = mapped_column(

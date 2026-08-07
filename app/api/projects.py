@@ -12,10 +12,12 @@ from app.api.schemas import (
     DelegationOut,
     MembershipCreate,
     MembershipOut,
+    ProjectArchiveOut,
     ProjectCreate,
     ProjectOut,
 )
 from app.core.db import get_session
+from app.documents.service import ProjectAlreadyArchived, archive_project
 from app.identity.models import Delegation, Membership, User
 from app.identity.service import ADMIN_ROLES, accessible_project_ids, effective_roles
 from app.models import Project, Vertical
@@ -146,6 +148,32 @@ async def list_projects(
 @router.get("/{project_id}", response_model=ProjectOut)
 async def read_project(project: Annotated[Project, Depends(get_project)]) -> Project:
     return project
+
+
+@router.post("/{project_id}/archive", response_model=ProjectArchiveOut)
+async def archive_project_endpoint(
+    project: Annotated[Project, Depends(require_project_role(*ADMIN_ROLES))],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> ProjectArchiveOut:
+    """§11.2's /projects 'archive' operation — FR-DOC-06 needs this to exist
+    at all (no prior session ever wrote to Project.archived_at). Applies the
+    org/project's RetentionPolicy to the project's documents (resolution
+    only — no deletion scheduler, see app/documents/service.py's
+    archive_project docstring) and records the action on
+    document_audit_log. Broader "update"/"export" operations from §11.2
+    stay unbuilt; this endpoint only closes "archive"."""
+    try:
+        archived, policy = await archive_project(session, project=project, actor_id=user.id)
+    except ProjectAlreadyArchived as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    await session.commit()
+
+    return ProjectArchiveOut(
+        project=archived,
+        retention_policy_id=policy.id if policy else None,
+        retention_days=policy.retention_days if policy else None,
+    )
 
 
 @router.post("/{project_id}/members", response_model=MembershipOut, status_code=201)

@@ -31,6 +31,16 @@ ChannelTypeLiteral = Literal["whatsapp", "wechat", "teams", "outlook", "sharepoi
 # Mirrors app/models/governance.py's ConsentStatus native enum.
 ConsentStatusLiteral = Literal["pending", "accepted", "objected", "opted_out"]
 
+# Mirrors app/models/project.py's ChannelType native enum, *including*
+# "manual" — unlike ChannelTypeLiteral above (Channel-the-resource can never
+# be "manual"), Evidence.channel genuinely can be, and a document's evidence
+# is exactly an Evidence row (FR-LED-10's "manually-entered-but-fully-real"
+# posture, reused here for FR-DOC-01 ingestion).
+EvidenceChannelLiteral = Literal["whatsapp", "wechat", "teams", "outlook", "sharepoint", "manual"]
+
+# Mirrors app/documents/models.py's SpecClaimAttribute native enum.
+SpecClaimAttributeLiteral = Literal["dimension", "finish", "quantity", "price"]
+
 
 class MembershipCreate(BaseModel):
     """FR-ADM-06's 'assign members' step. Keyed by email, not user_id — an
@@ -464,3 +474,100 @@ class RetentionPolicyUpdate(BaseModel):
     vertical_id: uuid.UUID | None = None
     region: str | None = None
     retention_days: int | None = Field(default=None, gt=0)
+
+
+class ProjectArchiveOut(BaseModel):
+    """POST .../archive's response — the project itself plus what
+    FR-DOC-06's retention-policy application actually resolved to, since
+    there's no deletion scheduler to hand that resolution to yet
+    (app/documents/service.py's archive_project docstring)."""
+
+    project: ProjectOut
+    retention_policy_id: uuid.UUID | None
+    retention_days: int | None
+
+
+# --- Documents (PRD §6.6, FR-DOC; §4.3's Spec Claim schema) ------------
+
+
+class DocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    class_term_id: uuid.UUID | None
+    milestone_type_term_id: uuid.UUID | None
+    phase_term_id: uuid.UUID | None
+    current_version_id: uuid.UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentVersionOut(BaseModel):
+    id: uuid.UUID
+    document_id: uuid.UUID
+    version_no: int
+    storage_ref: str
+    extracted_text: str | None
+    approved_by: uuid.UUID | None
+    approved_at: datetime | None
+    is_current: bool
+    download_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class DocumentLineageOut(BaseModel):
+    """FR-DOC-02/04: the full version history of one document, in order,
+    with the currently-approved-and-authoritative version unambiguously
+    flagged (each DocumentVersionOut's own `is_current`, and repeated here
+    at the top level for a client that only wants the pointer)."""
+
+    document_id: uuid.UUID
+    current_version_id: uuid.UUID | None
+    versions: list[DocumentVersionOut]
+
+
+class DocumentCreate(BaseModel):
+    """FR-DOC-01 ingestion — manual/API upload, same "manually-entered-but-
+    fully-real" posture Ledger established for FR-LED-10: the caller
+    supplies the file and its own evidence, never a simulated one. Sent as
+    multipart/form-data (app/api/documents.py's create_document endpoint),
+    not JSON — this model documents the field set but isn't bound directly
+    to the request body."""
+
+    name: str
+    class_code: str | None = None
+    channel: EvidenceChannelLiteral = "manual"
+    sent_at: datetime | None = None
+    language: str = "en"
+    original_text: str | None = None
+    translation: str | None = None
+    extracted_text: str | None = None
+
+
+class DocumentTagRequest(BaseModel):
+    """FR-DOC-03. Every field optional — a caller may tag one axis without
+    disturbing the others already set."""
+
+    class_code: str | None = None
+    milestone_type_code: str | None = None
+    phase_code: str | None = None
+
+
+class SpecClaimOut(BaseModel):
+    id: uuid.UUID
+    document_version_id: uuid.UUID
+    deliverable_id: uuid.UUID | None
+    location_code: str | None
+    attribute: SpecClaimAttributeLiteral
+    value: str
+    contradicts: uuid.UUID | None
+    evidence: list[EvidenceOut]
+
+
+class DocumentSearchResult(BaseModel):
+    document: DocumentOut
+    version: DocumentVersionOut
+    rank: float

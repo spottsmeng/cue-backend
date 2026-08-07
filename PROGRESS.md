@@ -13,7 +13,7 @@ there yet.
 |---|---|---|---|---|---|
 | M1 | Production Twin | `Prompt 4 — Production Twin.txt` | §15 Phase 3 | Ledger (done) | Done (2026-08-07) |
 | M2 | Governance completion | `Prompt 5 — Governance completion.txt` | §15 Phase 9 (remainder) | Identity/RBAC (done) | Done (2026-08-07) |
-| M3 | Documents | `Prompt 6 — Documents.txt` | §15 Phase 8 | — | Not started |
+| M3 | Documents | `Prompt 6 — Documents.txt` | §15 Phase 8 | — | Done (2026-08-07) |
 | M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Not started |
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Not started |
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Not started |
@@ -166,6 +166,124 @@ RBAC/delegation session and untouched here.
   single CSV for the consent ledger. Documents are named in FR-ADM-10's "ledger, documents, audit" but
   skipped from the bundle — that milestone (M3) doesn't exist yet, per Prompt 5's own scope note; add a
   `documents` key/CSV once it does.
+
+### M3 notes for later sessions
+
+Closed FR-DOC-01 through 06 and 08 (per Prompt 6's own scope line). FR-DOC-07 (real SharePoint
+write-back) was originally interface-only per Prompt 6's own EXPLICITLY OUT OF SCOPE section
+(deferred to Prompt 11, Real channel capture) — a real, opt-in Graph-backed implementation was added
+same-session afterward, ahead of that schedule, for competition-demo purposes (see the write-back
+bullet below). FR-DOC-09 (chat-vs-approved-version drift detection) remains genuinely not closeable
+— it structurally needs Prompt 11's real chat-capture pipeline to have anything to compare against,
+which no demo shortcut changes.
+
+- **Real OCR (PaddleOCR) and real document parsing (Docling) are not wired up this session** —
+  `DocumentVersion.extracted_text` is a plain-text field the caller (or, today, a test) supplies
+  directly at upload/version-creation time, standing in for what a real OCR/parsing pipeline would
+  derive from the uploaded binary (`storage_ref`). Full-text search (FR-DOC-05, tsvector/GIN) and
+  spec-claim extraction (FR-DOC-08) are both therefore only as complete as this stand-in text is —
+  not a discrepancy to silently paper over, a direct, documented consequence of this session's own
+  scope limit (CUE-Tech-Stack.md §2.4 names the real production choices). Wiring real OCR/parsing is
+  a deliberate, separate scope item for a later hardening pass.
+- **New module `app/documents/` — models, storage, sharepoint, extractor, schema, service, audit** —
+  same per-domain-module-owns-its-models precedent `app/twin/models.py` and
+  `app/models/governance.py` already established, per `app/models/ledger.py`'s own top-of-file scope
+  note explicitly carving Document out of the Ledger core.
+- **`app/documents/storage.py`'s `StorageBackend` Protocol, one real implementation
+  (`MinioStorageBackend`)** — no object store existed anywhere in this codebase before this session
+  (confirmed: no S3/MinIO client anywhere). `docker-compose.yml` gained a `minio` service
+  (health-checked, named volume, same shape the existing `postgres` service already has). Original
+  file bytes are never mutated after upload — a new version is always a new object key
+  (`documents/{document_id}/v{n}/{uuid}`), never an overwrite.
+- **`docker-compose.yml`'s `postgres` image changed from `postgres:17` to `pgvector/pgvector:pg17`**
+  — a drop-in replacement (same major version, same data directory layout; the existing named volume
+  survived the swap untouched, confirmed by re-inspecting `\dt` after recreation) — required because
+  `DocumentVersion.embedding` (the pgvector column below) needs `CREATE EXTENSION vector` to exist at
+  all, and the plain `postgres:17` image has no path to add that extension after the fact.
+- **`app/documents/sharepoint.py`'s `SharePointAdapter` Protocol now has two implementations, not
+  one** — `NoOpSharePointAdapter` (still the default; logs and returns, no external call, no
+  credentials required to run this codebase at all) and `GraphSharePointAdapter`, a real
+  Microsoft Graph write-back. The real implementation was originally scoped to Prompt 11 (gated on
+  Pico's own tenant credentials) — brought forward same-session, post-hoc, because a competition
+  demo needs to show a real write landing in a real SharePoint library, not a log line. This is a
+  deliberate deviation from the milestone plan's own sequencing, not an oversight.
+  - Selected via `CUE_SHAREPOINT_PROVIDER=noop|graph` (`app/documents/config.py`'s
+    `SharePointSettings`), same env-driven provider-switch shape `app/llm/factory.py` already
+    established for Ollama/Anthropic. Nothing about the adapter is Pico-specific — it targets
+    whichever tenant/site the config points at, so a free Microsoft 365 Developer Program sandbox
+    tenant works identically to Pico's real one for demo purposes; swapping to Pico's tenant later
+    is a credentials change, not a code change.
+  - App-only (client-credentials) auth via `msal`, `Sites.ReadWrite.All` application permission.
+    `ConfidentialClientApplication` construction is deliberately lazy (first token acquisition, not
+    adapter construction) — MSAL unconditionally performs a live OIDC tenant-discovery network call
+    as part of building that object, which would otherwise make constructing the adapter itself (a
+    FastAPI dependency resolution) a network operation; found by the adapter's own unit tests
+    failing against a fake tenant id, not by inspection.
+  - Writes to the *same path* per Document (`{library_folder}/{document.name}`) on every approval,
+    not a new file per version — SharePoint's own built-in version history then shows the approval
+    trail natively, which is both more useful to anyone opening the library directly and a more
+    convincing demo than a pile of `v1`/`v2`/`v3` files.
+  - A write-back failure (network blip, expired demo-tenant token) does **not** roll back the
+    approval — the approval is already a real, committed fact about CUE's own state, independent of
+    whether the external sync succeeded. Outcome recorded on `document_audit_log`'s
+    `version_approved` detail (`sharepoint_write_back: "ok"` or `"failed: ..."`) either way, so a
+    failure is visible and diagnosable, never silently swallowed.
+  - Known, named limitation: files over Graph's 4 MiB simple-upload limit raise a clear error —
+    resumable upload sessions aren't implemented (sized for a demo/early-production document set:
+    specs, drawings, quotations — not arbitrary large media).
+  - Called from `POST .../versions/{id}/approve` — approval is also FR-DOC-07's write-back trigger
+    point, unchanged from the original design.
+- **The shared `evidence` table (`app/models/ledger.py`) gained two more nullable subject columns**
+  — `document_version_id`, `spec_claim_id` — rather than either domain inventing its own evidence
+  table; the CHECK constraint widened from "exactly one of {commitment, budget}" to "exactly one of
+  {commitment, budget, document_version, spec_claim}" (migration `f3a1c9d7e4b2`). `evidence` itself
+  still has no RLS policy of its own — a pre-existing gap from the Ledger session, untouched by every
+  session since (including this one); every query against it in this codebase, old and new, is always
+  scoped by an already-RLS/role-checked parent id, never queried bare.
+- **`DocumentVersion` and `SpecClaim` both get the same deferred-constraint-trigger evidence
+  requirement Commitment/Budget already have** (`check_document_version_has_evidence`,
+  `check_spec_claim_has_evidence`, same `DEFERRABLE INITIALLY DEFERRED` shape) — per Prompt 6's
+  explicit instruction, even though PRD §4.1's own ER diagram marks `DOCUMENT_VERSION`'s evidence
+  link optional (`}o--o|`). Followed the prompt, not the ER diagram, on this one point.
+- **`document_audit_log`** (this domain's own append-only trail, same shape `twin_audit_log`
+  established) — built with the SET-NULL-on-delete append-only carve-out from the start, not as a
+  follow-up migration the way `twin_audit_log` needed one (`e771d0318751`) after the fact. One real
+  design difference from `twin_audit_log`: `document_id` and `document_version_id` are **not**
+  mutually exclusive on this table (a `version_created`/`version_approved` row legitimately carries
+  both — parent and child, not two independent alternatives) — an early draft added a
+  `NOT (both non-null)` CHECK mirroring `twin_audit_log`'s milestone/dependency one and it was wrong;
+  removed before this session ended (caught by the migration's own downgrade/upgrade + full pytest
+  cycle, not by inspection).
+- **`Document.class_term_id` / `milestone_type_term_id` / `phase_term_id`** are the FR-DOC-03
+  auto-tag targets (`POST .../documents/{id}/tag`) — three ontology_terms lookups, all nullable.
+  `class_code`/`phase_code` resolve via a simple universal-core-only query (mirrors
+  `app/ledger/extractor.py`'s `_get_commitment_act_term` exactly, since `deliverable_class`/`phase`
+  are both seeded universal-core, migration `a7c2e5f19b34`). `milestone_type_code` does **not** use
+  that same simple query — `milestone_type` was re-keyed to the event-production vertical pack by an
+  earlier session (`eed5a4da79f6`), so it reuses `app/twin/service.py`'s existing project-aware,
+  three-tier `get_milestone_type_term` instead (found the hard way: the simple universal-core query
+  returned "not seeded" for a real, correctly-seeded term — a test caught it, not inspection).
+- **FR-DOC-05: lexical search only, this session** — Postgres full-text (`tsvector`/GIN index,
+  `to_tsvector('english', ...)` as a generated STORED column) over `DocumentVersion.extracted_text`.
+  `DocumentVersion.embedding` (pgvector, dimension 1024 to match BGE-M3) is added but deliberately
+  left unpopulated — Prompt 6's own EXPLICITLY OUT OF SCOPE note; the embedding client is Prompt 9's
+  (Ask & retrieval) job, and the column exists now so that milestone needs no migration of its own.
+- **FR-DOC-06: `POST /projects/{id}/archive`** (ADMIN_ROLES-gated) — the first session to ever write
+  to `Project.archived_at` (confirmed at the start of this session: no prior write path existed at
+  all). "Applies" the org/project's RetentionPolicy in the sense of *resolving* which policy governs
+  this project (most-specific-match over org × vertical — `Project` has no `region` column of its
+  own, so that axis is never narrowed) and recording that resolution on `document_audit_log` — there
+  is still no deletion scheduler to hand it to (RetentionPolicy's own note from the Governance
+  session: "nothing consumes this value yet"; still true). The audit trail is retained intact —
+  archiving never deletes or mutates any prior `audit_log`/`twin_audit_log`/`document_audit_log` row.
+- **Contradiction/spec-drift detection that *compares* spec claims across documents is not built** —
+  `SpecClaim.contradicts` exists (per §4.3's schema) but nothing populates it yet; that's Foresight
+  (Prompt 7), which depends on this milestone's `SpecClaim` table existing and now can proceed.
+- **`/admin/export/{project_id}`'s bundle (`app/api/admin.py`) still skips documents** — its own
+  comment already flagged this ("Documents skipped this session — that milestone doesn't exist yet
+  ... add a `documents` key/CSV once it does"). M3 exists now; adding that key is a genuine, narrow
+  follow-up for whichever future session touches `admin.py` next, not done here since Prompt 6 never
+  named it as this session's job.
 
 **Already done, before this table existed** (the deterministic audit this plan is built on found
 these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle state machine, audit

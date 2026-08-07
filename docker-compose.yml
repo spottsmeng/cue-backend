@@ -2,7 +2,13 @@ name: cue-backend
 
 services:
   postgres:
-    image: postgres:17
+    # pgvector/pgvector:pg17 is postgres:17 plus the `vector` extension
+    # compiled in — a drop-in replacement (same Postgres major version, same
+    # data directory layout), needed from this session onward because
+    # DocumentVersion.embedding (Prompt 6, FR-DOC-05's semantic-search
+    # column) requires `CREATE EXTENSION vector` to exist at all. The plain
+    # postgres:17 image has no path to add that extension after the fact.
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: cue
       POSTGRES_PASSWORD: cue
@@ -21,5 +27,27 @@ services:
       timeout: 3s
       retries: 30
 
+  # app/documents/storage.py's StorageBackend Protocol has one real
+  # implementation this session (MinioStorageBackend) — this is its local
+  # dev/test target. No object store existed anywhere in this codebase
+  # before Prompt 6 (confirmed: no S3/MinIO client anywhere).
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: cue
+      MINIO_ROOT_PASSWORD: cue_minio_secret
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - cue_minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   cue_postgres_data:
+  cue_minio_data:

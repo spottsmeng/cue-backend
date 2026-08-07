@@ -92,6 +92,37 @@ MILESTONE_TYPES = [
     ("crate_collection", "Crate collection", "箱柜回收"),
 ]
 
+# Mirrors alembic/versions/a7c2e5f19b34's seed (Prompt 6, Documents) — same
+# deliberate duplication rationale as COMMITMENT_ACTS/MILESTONE_TYPES above.
+# app/documents/models.py's Document.class_term_id / phase_term_id need
+# these present for any test that exercises tagging or ingestion with a
+# class_code/phase_code.
+DELIVERABLE_CLASSES = [
+    ("booth_structure", "Booth structure", "展位结构"),
+    ("graphic_panel", "Graphic panel", "图形展板"),
+    ("av_equipment", "AV equipment", "视听设备"),
+    ("led_screen", "LED screen", "LED屏幕"),
+    ("content_asset", "Content asset", "内容素材"),
+    ("furniture", "Furniture", "家具"),
+    ("floral", "Floral", "花艺"),
+    ("fnb_service", "F&B service", "餐饮服务"),
+    ("staffing_roster", "Staffing roster", "人员排班"),
+    ("permit", "Permit", "许可证"),
+    ("signage", "Signage", "标识"),
+]
+
+PHASES = [
+    ("pre_production", "Pre-production", "筹备期"),
+    ("design", "Design", "设计"),
+    ("fabrication", "Fabrication", "制作"),
+    ("logistics", "Logistics", "物流"),
+    ("bump_in", "Bump-in (build-up)", "进场搭建"),
+    ("rehearsal", "Rehearsal", "彩排"),
+    ("live", "Live", "活动进行"),
+    ("bump_out", "Bump-out (teardown)", "拆场"),
+    ("reconciliation", "Reconciliation", "结算"),
+]
+
 
 async def _ensure_test_database() -> None:
     admin_engine = create_async_engine(ADMIN_URL, isolation_level="AUTOCOMMIT")
@@ -261,6 +292,30 @@ async def _reseed_universal_ontology_terms(conn) -> None:
                 "vertical_code": EVENT_PRODUCTION_VERTICAL_CODE,
             }
             for i, (code, label_en, label_zh) in enumerate(MILESTONE_TYPES)
+        ],
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO ontology_terms "
+            "(id, category, code, label_en, label_zh, sort_order, active, effective_from, version) "
+            "VALUES (gen_random_uuid(), 'deliverable_class', :code, :label_en, :label_zh, "
+            ":sort_order, true, now(), 1)"
+        ),
+        [
+            {"code": code, "label_en": label_en, "label_zh": label_zh, "sort_order": i}
+            for i, (code, label_en, label_zh) in enumerate(DELIVERABLE_CLASSES)
+        ],
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO ontology_terms "
+            "(id, category, code, label_en, label_zh, sort_order, active, effective_from, version) "
+            "VALUES (gen_random_uuid(), 'phase', :code, :label_en, :label_zh, "
+            ":sort_order, true, now(), 1)"
+        ),
+        [
+            {"code": code, "label_en": label_en, "label_zh": label_zh, "sort_order": i}
+            for i, (code, label_en, label_zh) in enumerate(PHASES)
         ],
     )
 

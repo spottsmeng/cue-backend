@@ -15,6 +15,7 @@ from app.twin.models import (
     MilestoneArchetypeItem,
     TwinAuditLog,
 )
+from app.documents.models import Document, DocumentAuditLog, DocumentVersion, SpecClaim
 
 __all__ = [
     "Base",
@@ -41,4 +42,8 @@ __all__ = [
     "MilestoneArchetypeDependency",
     "MilestoneArchetypeItem",
     "TwinAuditLog",
+    "Document",
+    "DocumentVersion",
+    "SpecClaim",
+    "DocumentAuditLog",
 ]
