@@ -11,13 +11,31 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.identity.config import get_identity_settings
+from app.identity.models import Membership, User
 from app.models import Organisation, Party
 from main import app
-from tests.conftest import auth_headers, set_org_context
+from tests.conftest import auth_headers, mint_token, set_org_context
 
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _member(app_session, org_id, project_id, role, granted_by):
+    await set_org_context(app_session, org_id)
+    subject = f"{role}-{uuid.uuid4()}"
+    user = User(
+        organisation_id=org_id,
+        issuer=get_identity_settings().local_issuer,
+        external_subject=subject,
+        email=f"{subject}@example.test",
+    )
+    app_session.add(user)
+    await app_session.flush()
+    app_session.add(Membership(user_id=user.id, project_id=project_id, role=role, granted_by=granted_by))
+    await app_session.commit()
+    return user, mint_token(org_id, subject=subject, email=user.email)
 
 
 async def _create_commitment(client, token, project_id, vendor_id, internal_id, **overrides):
@@ -328,3 +346,93 @@ async def test_commitments_are_isolated_by_org(app_session, authed_org_and_proje
         )
 
     assert response.status_code == 404
+
+
+# --- payment-status (FR-LED-13, §6.14 FR-ADM-11's shared role gate) ------
+
+
+@pytest.mark.asyncio
+async def test_finance_role_can_set_payment_status(app_session, authed_org_and_project, parties):
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    vendor, internal = parties
+    _finance, finance_token = await _member(app_session, org_id, project_id, "finance", admin.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_commitment(client, admin_token, project_id, vendor.id, internal.id)
+        commitment_id = created.json()["id"]
+
+        response = await client.patch(
+            f"/projects/{project_id}/commitments/{commitment_id}/payment-status",
+            headers=_headers(finance_token),
+            json={"payment_status": "invoiced"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["payment_status"] == "invoiced"
+
+
+@pytest.mark.asyncio
+async def test_producer_role_can_set_payment_status(app_session, authed_org_and_project, parties):
+    """FINANCE_ROLES = {"finance", "producer"} — Producer is the other half
+    of FR-ADM-11's merged Finance & Procurement persona."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    vendor, internal = parties
+    _producer, producer_token = await _member(app_session, org_id, project_id, "producer", admin.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_commitment(client, admin_token, project_id, vendor.id, internal.id)
+        commitment_id = created.json()["id"]
+
+        response = await client.patch(
+            f"/projects/{project_id}/commitments/{commitment_id}/payment-status",
+            headers=_headers(producer_token),
+            json={"payment_status": "paid"},
+        )
+    assert response.status_code == 200, response.text
+
+
+@pytest.mark.asyncio
+async def test_administrator_cannot_set_payment_status(authed_org_and_project, parties):
+    """FR-LED-13: 'settable only by the Finance & Procurement role' —
+    Administrator is not one of them, same as Budget's own gate."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    vendor, internal = parties
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_commitment(client, admin_token, project_id, vendor.id, internal.id)
+        commitment_id = created.json()["id"]
+
+        response = await client.patch(
+            f"/projects/{project_id}/commitments/{commitment_id}/payment-status",
+            headers=_headers(admin_token),
+            json={"payment_status": "paid"},
+        )
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_payment_status_is_not_settable_via_verify_endpoint(authed_org_and_project, parties):
+    """FR-LED-13: 'never inferred from message content' — structurally
+    distinct from the /verify correction path, which handles model-extracted
+    fields. CommitmentCorrection has no payment_status field at all, so
+    attempting to smuggle it through there is silently ignored by pydantic,
+    not applied."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    vendor, internal = parties
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_commitment(client, admin_token, project_id, vendor.id, internal.id)
+        commitment_id = created.json()["id"]
+
+        response = await client.post(
+            f"/projects/{project_id}/commitments/{commitment_id}/verify",
+            headers=_headers(admin_token),
+            json={"corrections": {"payment_status": "paid"}},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["payment_status"] is None

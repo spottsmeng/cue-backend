@@ -14,11 +14,12 @@ from app.api.schemas import (
     CommitmentOut,
     CommitmentStateLiteral,
     EvidenceOut,
+    PaymentStatusUpdate,
     TransitionRequest,
     VerifyRequest,
 )
 from app.core.db import get_session
-from app.identity.service import WRITE_ROLES
+from app.identity.service import FINANCE_ROLES, WRITE_ROLES
 from app.ledger.audit import record_audit_event
 from app.ledger.extractor import _get_commitment_act_term
 from app.ledger.lifecycle import InvalidTransition, validate_transition
@@ -26,6 +27,7 @@ from app.models import Commitment, Deliverable, Evidence, Party, Project
 from app.twin.service import recompute_on_commitment_transition
 
 _require_write = require_project_role(*WRITE_ROLES)
+_require_finance = require_project_role(*FINANCE_ROLES)
 
 router = APIRouter(prefix="/projects/{project_id}/commitments", tags=["commitments"])
 
@@ -326,6 +328,36 @@ async def transition_commitment(
         commitment=commitment,
         to_state=body.to_state,
         actor_id=actor_id,
+    )
+    await session.commit()
+    return await _to_out(session, commitment)
+
+
+@router.patch("/{commitment_id}/payment-status", response_model=CommitmentOut)
+async def update_payment_status(
+    commitment_id: uuid.UUID,
+    body: PaymentStatusUpdate,
+    project: Annotated[Project, Depends(_require_finance)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    actor_id: Annotated[uuid.UUID, Depends(get_actor_id)],
+) -> CommitmentOut:
+    """FR-LED-13: Finance-role-gated, structurally distinct from
+    POST .../verify's CommitmentCorrection on purpose — payment_status must
+    never be inferred from message content, so it can never be set through
+    the same path that handles model-extracted field corrections."""
+    commitment = await _get_commitment(session, project, commitment_id)
+    before = commitment.payment_status
+    commitment.payment_status = body.payment_status
+    await session.flush()
+    await _refresh_updated_at(session, commitment)
+
+    await record_audit_event(
+        session,
+        project_id=project.id,
+        commitment_id=commitment.id,
+        action="payment_status_updated",
+        actor_id=actor_id,
+        detail={"changes": {"payment_status": {"before": before, "after": body.payment_status}}},
     )
     await session.commit()
     return await _to_out(session, commitment)

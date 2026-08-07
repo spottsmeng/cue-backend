@@ -12,7 +12,7 @@ there yet.
 | # | Milestone | Prompt file | PRD phase | Depends on | Status |
 |---|---|---|---|---|---|
 | M1 | Production Twin | `Prompt 4 — Production Twin.txt` | §15 Phase 3 | Ledger (done) | Done (2026-08-07) |
-| M2 | Governance completion | `Prompt 5 — Governance completion.txt` | §15 Phase 9 (remainder) | Identity/RBAC (done) | Not started |
+| M2 | Governance completion | `Prompt 5 — Governance completion.txt` | §15 Phase 9 (remainder) | Identity/RBAC (done) | Done (2026-08-07) |
 | M3 | Documents | `Prompt 6 — Documents.txt` | §15 Phase 8 | — | Not started |
 | M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Not started |
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Not started |
@@ -95,6 +95,77 @@ passes; superseded first-pass decisions are not listed separately.
 - Foresight (M4) can now read `app/twin/service.py`'s `compute_current`/`compute_propagation` for
   slack, critical path and hypothetical impact — it does not yet *decide* anything from them
   (FR-LCY-02/03's automatic `committed → at_risk` / `at_risk → broken` transitions are still M4's job).
+
+### M2 notes for later sessions
+
+Closed FR-ADM-06's "attach channels" half, 07, 08, 09, 10, 11 — 01 through 05 were already done by the
+RBAC/delegation session and untouched here.
+
+- **`FINANCE_ROLES = {"finance", "producer"}`** (`app/identity/service.py`), sitting alongside
+  `WRITE_ROLES`/`ADMIN_ROLES`. Gates every Budget write and `PATCH .../payment-status` — the two
+  surfaces FR-ADM-11 and FR-LED-13 both name as "Finance or Producer" / "Finance & Procurement". No
+  ninth "Procurement" role was added — FR-ADM-01's role list is a closed native enum, and the PRD's
+  own persona table already merges Finance and Procurement into one persona. The Vendor Reliability
+  Graph milestone (M7, FR-VRG-05's "expose to Procurement with appropriate access control") should
+  reuse this same constant rather than inventing its own.
+- **`budgets` and `channels` got their `tenant_isolation` RLS policy for the first time this session**
+  (migration `9ddb100d7e8e`) — both tables existed since the very first migration (`a895ae03ec5c`) but
+  were left off its RLS section on purpose ("demonstrated on organisations/projects/commitments...not
+  done exhaustively here"), and M1's own notes recorded the gap as latent-but-harmless specifically
+  because nothing queried either table yet. This session is what built the first real endpoints against
+  both (`app/api/budget.py`, `app/api/channels.py`), so — same rule `616998fb7f1b` applied to
+  `milestones` — closing the gap was this session's job, not left for later. `deliverables` is the same
+  latent shape and is *still* untouched by any endpoint after this session too; left alone, same
+  reasoning, for whichever future session builds the first endpoint against it.
+- **`audit_action` gained a fifth value, `payment_status_updated`** (same migration, `ALTER TYPE ...
+  ADD VALUE`, mirroring `d7def2e27c7c`'s precedent for `twin_audit_action`) — FR-LED-13 requires
+  `payment_status` to be structurally distinct from a `/verify` correction, so it needed its own audit
+  action rather than being folded into `"corrected"`. `app/models/audit.py`'s Python-side `AuditAction`
+  enum values list was updated to match, same "keep the Python list in sync even though the real ALTER
+  happens via raw SQL" pattern `TwinAuditAction` already established.
+- **`ConsentRecord.evidence` is a plain nullable text column, not a row in the shared polymorphic
+  `evidence` table** (`app/models/governance.py`). The `evidence` table's CHECK constraint is
+  hard-coded to exactly one of `{commitment_id, budget_id}`; extending it to a third subject wasn't
+  needed because this session has no captured-message path to point at for most consent transitions
+  anyway (the actual notice-sending flow is out of scope — FR-CAP-06's real channel adapter doesn't
+  exist yet). If a future session wires up real consent-notice capture, revisit whether `evidence`
+  should gain a `consent_record_id` column at that point, once there's a real message to link.
+- **`ConsentRecord` is one current row per `(party_id, project_id)`, not an append-only history** —
+  `POST /admin/consent/action-request` is an upsert keyed on that pair (same idempotent-by-natural-key
+  shape `app/api/projects.py`'s `_grant_membership` already uses for `Membership`), not a new row per
+  transition. Justified by FR-CAP-07's "honour opt-out immediately": only the *current* status is ever
+  actually acted on. If a future session needs a full transition history for audit purposes, that's an
+  additive change (an append-only consent event log alongside this table), not a rework of it.
+- **`RetentionPolicy` is deliberately minimal** — org × vertical ("project type") × region → a single
+  `retention_days` window, matching Prompt 5's own field list exactly. It has no per-record-class
+  dimension, even though PRD §10.3's own table gives messages/ledger/documents/audit/consent each a
+  different default and "configurable" flag. Nothing consumes this value yet (deletion automation is
+  explicitly out of scope this session), so there was nothing forcing that extra axis to exist yet — a
+  future session building the deletion scheduler should revisit whether `RetentionPolicy` needs a
+  `record_class` column at that point, once there's a real consumer to differentiate for.
+- **`require_org_administrator`** (`app/api/deps.py`), new alongside `require_project_role` — answers
+  "does this user hold `administrator` on *at least one* project in this org", not "can this user act on
+  *this* project". Every `/admin/*` endpoint (`app/api/admin.py`, `consent.py`, `retention.py`) is gated
+  by this, not `require_project_role`, which is what lets an Administrator on project A reach project B
+  through `/admin/export` even with zero membership on B — the property
+  `tests/test_admin_api.py::test_org_admin_visibility_is_distinct_from_project_membership` exercises
+  directly, as the testing expectation in Prompt 5 asked for by name.
+- **Channels API write endpoints (attach/detach/health/reconnect) are gated `ADMIN_ROLES`**, the same
+  tier `app/api/projects.py`'s `add_member` uses — FR-ADM-06 names "attach channels" as part of
+  provisioning, the same admin-tier surface. There is no service-account/agent identity yet for a real
+  capture agent to call `POST .../health` as (M8, Real channel capture, is genuinely gated on Pico
+  credentials) — this is a placeholder until that identity model exists; M8 will need to decide whether
+  a capture agent authenticates as a project member at all, or gets its own non-RBAC auth path.
+- **`GET /projects/{id}/channels`** (list) exists even though PRD §11.2's own resource table only names
+  "attach · detach · health · reconnect" for this resource — without a way to list a project's channels
+  there'd be no way to discover a `channel_id` to detach/health/reconnect against, and FR-ADM-09's
+  "surface degraded channels to Administrators" needs a listing surface to read from.
+- **`/admin/export/{project_id}` and `/admin/consent/export` both support `?format=json|csv`** —
+  `json` (default) is a structured bundle in one response; `csv` returns a zip of per-table CSVs for the
+  project export (`project.csv`/`commitments.csv`/`evidence.csv`/`budgets.csv`/`audit_log.csv`) and a
+  single CSV for the consent ledger. Documents are named in FR-ADM-10's "ledger, documents, audit" but
+  skipped from the bundle — that milestone (M3) doesn't exist yet, per Prompt 5's own scope note; add a
+  `documents` key/CSV once it does.
 
 **Already done, before this table existed** (the deterministic audit this plan is built on found
 these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle state machine, audit

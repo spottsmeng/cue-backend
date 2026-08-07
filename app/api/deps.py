@@ -16,7 +16,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
-from app.identity.models import User
+from app.identity.models import Membership, User
 from app.identity.service import effective_roles, resolve_user
 from app.identity.tokens import TokenVerificationError, get_token_verifier
 from app.models import Project
@@ -108,3 +108,46 @@ def require_project_role(*roles: str):
 
 
 get_project = require_project_role()
+
+
+async def require_org_administrator(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """§11.2's /admin/* surfaces (users, roles, delegations, export) need a
+    genuinely different access rule from require_project_role() above — not
+    a variant reusing its logic, a different question entirely. That
+    dependency answers "can this user act on project X", scoped to a
+    membership or delegation on that one project; a non-member is 404'd
+    before role is even considered. This answers "does this user hold the
+    administrator role on *at least one* project in their own
+    organisation" — if so, every /admin/* endpoint they reach is then free
+    to read/list across every project in that organisation, not just ones
+    they happen to be a member of, which is the entire point of an org-wide
+    admin surface existing separately from the project-scoped one.
+
+    The membership query below carries no explicit organisation_id filter —
+    RLS's own tenant_isolation policy on `memberships` (project-joined,
+    since that table has no organisation_id column of its own) already
+    confines it to the caller's org, the same "RLS plus an independent
+    application-level check, not one replacing the other" split
+    app/api/projects.py's list_projects docstring describes for
+    accessible_project_ids. A user who is Administrator on project A but has
+    no membership at all on project B still passes this check and can read
+    B through /admin/*, even though Depends(get_project) on project B
+    directly would 404 them — see tests/test_admin_api.py for a test that
+    exercises exactly that distinction.
+    """
+    is_org_administrator = (
+        await session.execute(
+            select(Membership.id)
+            .where(Membership.user_id == user.id, Membership.role == "administrator")
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if is_org_administrator is None:
+        raise HTTPException(
+            status_code=403,
+            detail="administrator role required on at least one project in this organisation",
+        )
+    return user

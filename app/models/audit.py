@@ -13,8 +13,15 @@ from app.models.ledger import CommitmentState
 # enum rather than an ontology_terms row. FR-LED-09 (corrections as training
 # signal) is why "corrected" is distinguished from "verified": a
 # `verification_state` of human_corrected with an empty `detail.changes`
-# would be a silent contradiction.
-AuditAction = Enum("created", "verified", "corrected", "state_transition", name="audit_action")
+# would be a silent contradiction. "payment_status_updated" (migration
+# 9ddb100d7e8e, same ADD VALUE pattern d7def2e27c7c's twin_audit_action
+# additions already established) is FR-LED-13's own structurally distinct
+# path — never folded into "corrected", since payment_status is Finance-set
+# and must never be inferred from message content the way a correction is.
+AuditAction = Enum(
+    "created", "verified", "corrected", "state_transition", "payment_status_updated",
+    name="audit_action",
+)
 
 
 class AuditLog(Base, UUIDPk):

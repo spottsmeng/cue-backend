@@ -23,6 +23,14 @@ MembershipRoleLiteral = Literal[
     "administrator", "delegate", "read_only",
 ]
 
+# Mirrors app/models/project.py's ChannelType native enum, minus "manual" —
+# that value exists for Evidence.channel's "not captured off a channel at
+# all" case (FR-LED-10), never a meaningful type for an attachable Channel.
+ChannelTypeLiteral = Literal["whatsapp", "wechat", "teams", "outlook", "sharepoint"]
+
+# Mirrors app/models/governance.py's ConsentStatus native enum.
+ConsentStatusLiteral = Literal["pending", "accepted", "objected", "opted_out"]
+
 
 class MembershipCreate(BaseModel):
     """FR-ADM-06's 'assign members' step. Keyed by email, not user_id — an
@@ -320,3 +328,139 @@ class PropagateCandidateResult(BaseModel):
 
 class PropagateResponse(BaseModel):
     results: list[PropagateCandidateResult]
+
+
+# --- Governance completion (PRD §6.14, FR-ADM) -------------------------
+
+
+class UserOut(BaseModel):
+    """§11.2's /admin/users — org-wide, not the project-scoped MembershipOut
+    above. No SCIM pre-provisioning this session (out of scope, per the
+    identity/RBAC session's own note), so this only ever lists users who
+    have actually authenticated at least once."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organisation_id: uuid.UUID
+    email: str
+    display_name: str | None
+    active: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class BudgetOut(BaseModel):
+    """PRD §4.3's Budget schema."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    approved_amount: float
+    currency: str
+    approved_by: uuid.UUID
+    approved_at: datetime
+    revision_of: uuid.UUID | None
+    is_current: bool
+
+
+class BudgetWrite(BaseModel):
+    """Shared by both the initial baseline (POST) and a revision (POST
+    .../revise) — same fields either way. No `evidence` input: the API layer
+    always supplies it itself (an Evidence row naming the approving user's
+    own action), same pattern app/api/commitments.py's create_commitment
+    already uses for manually-entered commitments."""
+
+    approved_amount: float
+    currency: str = Field(min_length=3, max_length=3)
+
+
+class PaymentStatusUpdate(BaseModel):
+    """FR-LED-13: deliberately its own request body, not
+    CommitmentCorrection — payment_status must never be settable through the
+    general /verify endpoint that handles model-extracted fields."""
+
+    payment_status: PaymentStatusLiteral
+
+
+class ChannelOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    type: ChannelTypeLiteral
+    external_ref: str | None
+    healthy: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChannelCreate(BaseModel):
+    """FR-ADM-06's 'attach channels' step."""
+
+    type: ChannelTypeLiteral
+    external_ref: str | None = None
+
+
+class ChannelHealthSignal(BaseModel):
+    """FR-ADM-09: the receiving end of a capture agent's health report — no
+    producer calls this yet (a later milestone's real capture agents will),
+    but the shape is built now. `detail` is a free-form payload (e.g. last
+    error, last successful poll) recorded for the caller's own diagnostics,
+    not parsed here."""
+
+    healthy: bool
+    detail: dict | None = None
+
+
+class ConsentRecordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    party_id: uuid.UUID
+    project_id: uuid.UUID
+    notice_sent_at: datetime | None
+    status: ConsentStatusLiteral
+    evidence: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConsentActionRequest(BaseModel):
+    """FR-ADM-07's 'action data-subject requests' — records or updates a
+    party's consent status on a project. Upsert-by-(party_id, project_id),
+    same idempotent-by-natural-key shape app/api/projects.py's
+    _grant_membership already uses for Membership."""
+
+    party_id: uuid.UUID
+    project_id: uuid.UUID
+    status: ConsentStatusLiteral
+    evidence: str | None = None
+    notice_sent_at: datetime | None = None
+
+
+class RetentionPolicyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organisation_id: uuid.UUID
+    vertical_id: uuid.UUID | None
+    region: str | None
+    retention_days: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class RetentionPolicyCreate(BaseModel):
+    vertical_id: uuid.UUID | None = None
+    region: str | None = None
+    retention_days: int = Field(gt=0)
+
+
+class RetentionPolicyUpdate(BaseModel):
+    """Every field optional — most edits touch one axis or the window alone."""
+
+    vertical_id: uuid.UUID | None = None
+    region: str | None = None
+    retention_days: int | None = Field(default=None, gt=0)

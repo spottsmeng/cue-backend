@@ -26,6 +26,14 @@ WRITE_ROLES: frozenset[str] = frozenset(
 # Who may provision new projects and manage membership on them (FR-ADM-06).
 ADMIN_ROLES: frozenset[str] = frozenset({"administrator", "producer"})
 
+# Budget baseline / payment_status (FR-ADM-11, FR-LED-13). The PRD's own
+# persona table merges "Finance" and "Procurement" into one persona — there
+# is no distinct native role for each in FR-ADM-01's fixed list, so this tier
+# is modelled as {"finance", "producer"} rather than inventing a ninth role.
+# Procurement access (needed later, for the Vendor Reliability Graph
+# milestone) reuses this same tier.
+FINANCE_ROLES: frozenset[str] = frozenset({"finance", "producer"})
+
 
 async def resolve_user(session: AsyncSession, claims: TokenClaims) -> User:
     """Upsert-by-claims: the first request from a given (issuer, sub) creates
