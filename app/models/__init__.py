@@ -25,6 +25,7 @@ from app.foresight.models import (
     Risk,
     WebhookSubscription,
 )
+from app.reports.models import ReportScheduleConfig, ReportSnapshot
 
 __all__ = [
     "Base",
@@ -62,4 +63,6 @@ __all__ = [
     "ForesightThreshold",
     "QuietHoursConfig",
     "ForesightAuditLog",
+    "ReportSnapshot",
+    "ReportScheduleConfig",
 ]

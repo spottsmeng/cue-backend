@@ -26,6 +26,7 @@ from app.foresight.forecast import scan_forecast, scan_overdue_commitments
 from app.foresight.notification import deliver_due_notifications
 from app.foresight.silence import scan_silence
 from app.models import Project
+from app.reports.schedule import run_due_report_schedules
 
 logger = logging.getLogger("app.foresight.worker")
 
@@ -119,14 +120,27 @@ _arq_settings = get_arq_settings()
 class WorkerSettings:
     """arq's own discovery convention — a plain class with `functions`/
     `cron_jobs`/`redis_settings` attributes, referenced by dotted path on
-    the command line (module docstring)."""
+    the command line (module docstring).
 
-    functions = [run_foresight_sweep]
+    `run_due_report_schedules` (FR-RPT-09, app/reports/schedule.py) rides
+    this same worker process rather than standing up a second arq/Valkey
+    pair — Prompt 8's own instruction not to over-invest in scheduling
+    machinery beyond the Must-priority reporting items. Not a Foresight
+    concern living here by accident; this class is simply the one
+    background-job process this codebase runs at all.
+    """
+
+    functions = [run_foresight_sweep, run_due_report_schedules]
     # Every 15 minutes — frequent enough that a real silence/forecast/
     # escalation condition surfaces promptly, infrequent enough not to
     # hammer Postgres with a full-tenant scan; not tuned against any
     # measured load (there is none yet), a documented starting point like
     # every other threshold in this module, adjustable without a code
-    # change once there's real traffic to tune against.
-    cron_jobs = [cron(run_foresight_sweep, minute=set(range(0, 60, 15)))]
+    # change once there's real traffic to tune against. The report schedule
+    # scan shares this same cadence (app/reports/schedule.py's `_is_due`
+    # docstring: hour-granularity schedules don't need a finer tick).
+    cron_jobs = [
+        cron(run_foresight_sweep, minute=set(range(0, 60, 15))),
+        cron(run_due_report_schedules, minute=set(range(0, 60, 15))),
+    ]
     redis_settings = RedisSettings(host=_arq_settings.redis_host, port=_arq_settings.redis_port)

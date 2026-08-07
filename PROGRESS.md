@@ -15,7 +15,7 @@ there yet.
 | M2 | Governance completion | `Prompt 5 — Governance completion.txt` | §15 Phase 9 (remainder) | Identity/RBAC (done) | Done (2026-08-07) |
 | M3 | Documents | `Prompt 6 — Documents.txt` | §15 Phase 8 | — | Done (2026-08-07) |
 | M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Done (2026-08-08) |
-| M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Not started |
+| M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Done (2026-08-08) |
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Not started |
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Not started |
 | M8 | Real channel capture | `Prompt 11 — Real channel capture.txt` | §15 Phase 1 | M2, M4 | Not started — genuinely gated on Pico credentials; code is buildable now, real adapters aren't |
@@ -394,6 +394,114 @@ permitted but never wired to fire).
   `test_foresight_thresholds_api.py`. Escalation routing extends `tests/test_delegation.py`'s own
   `_member`/`_bare_user` fixture shape with a real `Delegation` row, proving delegation-aware routing
   (not just membership-based) end to end — `tests/test_foresight_escalation.py`.
+
+### M5 notes for later sessions
+
+Closed FR-RPT-01 through 10 (09/10 are Should-priority, implemented as a narrow
+config surface per Prompt 8's own "don't over-invest" instruction — see below).
+
+- **New module `app/reports/`** — models, schema, composer, render,
+  export_html, export_pptx, export_pdf, service, schedule, templates — same
+  per-domain-module-owns-its-models precedent every prior domain module
+  established.
+- **Only two tables**, deliberately: `ReportSnapshot` (FR-RPT-08) and
+  `ReportScheduleConfig` (FR-RPT-09/10). The "current" report itself is
+  recomputed fresh on every `GET .../report/current` call
+  (`app/reports/composer.py`'s `compose_report`) — no cache, no "current
+  report" table, per Prompt 8's own instruction and NFR-PRF-05's 30-second
+  export bar being realistic without one. `ReportSnapshot` is genuinely
+  immutable — a real DB trigger forbids *any* UPDATE or DELETE (not just a
+  SET-NULL-on-delete carve-out like the audit-log tables have, since nothing
+  else holds a FK into this table that would ever need one).
+- **Every scalar figure is wrapped in a `ReportField`**
+  (`app/reports/schema.py`) carrying `available`/`unavailable_reason`,
+  `verification_state` and a `provenance: list[ReportProvenance]` — this is
+  §8.4's "the report composer refuses to render a field without a resolvable
+  provenance link" made structural, not textual: an ungrounded figure is
+  `available=False` with a reason, in the response body, never a fabricated
+  number or a silently missing key. `current_phase` (Challenge Brief's own
+  "current project phase" field) is *always* structurally unavailable — no
+  phase-tracking field exists at the project level anywhere in this schema
+  (`Document.phase_term_id` tags individual documents, not the project), and
+  inventing a phase-from-milestone heuristic would have been exactly the
+  fabricated precision CLAUDE.md's Models table forbids elsewhere.
+- **§6.10's four-field budget-summary grounding rule has exactly one
+  implementation** — `app/reports/composer.py`'s `compute_budget_summary` —
+  reused by both the report itself and the export verification gate
+  (FR-RPT-06), so the numbers a Producer sees and the gate that blocks
+  export can never diverge. `outstanding_payments` deliberately has **no
+  state filter**, summing every commitment (any state, including
+  `withdrawn`) where `payment_status IS DISTINCT FROM 'paid'` — the PRD's
+  own §6.10 paragraph has no state carve-out for that field, and CLAUDE.md's
+  "don't compute any of them differently than that paragraph specifies" was
+  followed literally rather than narrowed on an assumption of what was
+  "really" meant.
+- **FR-RPT-05 (in-place editing) reuses the existing Commitment/Budget/
+  Deviation mutation endpoints directly** (`POST .../commitments/{id}/verify`,
+  `POST .../budget/revise`, `POST .../deviations/{id}/confirm`) — a
+  deliberate decision **not** to build a parallel report-specific edit
+  endpoint. Each of those endpoints already records the correction via the
+  existing audit trail with author and timestamp, which is exactly what the
+  PRD's own wording asks for; a future frontend's inline-edit controls call
+  these directly, then re-fetch `GET .../report/current` to see the
+  recomputed figures. No new code needed for this Must-priority item beyond
+  documenting the decision.
+- **Vendor status summary degrades gracefully when the Vendor Reliability
+  Graph (M7) doesn't exist yet** — `app/reports/composer.py` attempts
+  `from app.parties.reliability import get_reliability_metrics` in a
+  try/except `ImportError` at module load; there is no `app/parties/`
+  package at all yet, so this always takes the except branch today and every
+  vendor's `reliability` field reports structurally unavailable, citing M7's
+  own PROGRESS.md status. Starts resolving real metrics automatically the
+  day M7 adds that module — no change needed here.
+- **Project overview's visual references (FR-RPT-03) resolve via the only FK
+  path Deliverable and Document actually share** —
+  `SpecClaim.deliverable_id -> DocumentVersion -> Document` — since
+  `Document` itself carries no direct `deliverable_id` (confirmed: no such
+  column exists). Only a `Document.current_version_id` whose `approved_at`
+  is set is embedded; an unapproved or missing current version is reported
+  structurally unavailable, never a stale/unapproved image substituted in
+  (FR-RPT-03: "always the current version, never a stale one"). Vendor
+  status is grouped by `Party` directly, not a finer "vendor category" —
+  `ontology_terms`' own `vendor_category` category is named in a comment
+  (`app/models/ontology.py`) but has never been seeded or populated by any
+  session, so grouping by it would invent structure that doesn't exist yet.
+- **Export: one composition path, two renderers** — `app/reports/render.py`
+  normalises a composed `LivingWipReportOut` into a presentation-agnostic
+  `ReportRenderModel`; `export_pptx.py` (python-pptx, placeholder-branded per
+  `app/reports/templates.py`'s registry — no real Pico branding available,
+  the swap point is documented in that module) and `export_html.py` +
+  `export_pdf.py` (Playwright print-to-PDF over server-rendered HTML) both
+  read only that model, never `LivingWipReportOut` directly, per WHAT TO
+  BUILD #3's own instruction.
+- **FR-RPT-09/10 rides the existing arq worker** — `app/reports/schedule.py`'s
+  `run_due_report_schedules` (hour-granularity match against
+  `ReportScheduleConfig`, same schema-owner discovery-bypass reasoning
+  `app/foresight/worker.py`'s own sweep already documents for "no
+  service-account identity exists yet") is registered onto the *same*
+  `WorkerSettings` in `app/foresight/worker.py` rather than a second
+  broker/worker process for one lightweight periodic scan — Prompt 8's own
+  "don't over-invest" instruction, taken literally.
+- **Export/schedule-write endpoints are gated `ADMIN_ROLES`**
+  (`{"administrator", "producer"}`, `app/identity/service.py`) — reused
+  rather than inventing a report-specific role tier, since §12.2 already
+  makes "Freeze & Export" a Producer-owned control and `ADMIN_ROLES` is the
+  existing tier for exactly that kind of project-provisioning-adjacent
+  action (channel attach, membership add). Read access (`current`,
+  `snapshots`, `schedule` listing) stays at plain project-membership level
+  (`get_project`), same as every other read surface in this codebase.
+- Full coverage per Prompt 8's own testing expectation, `tests/test_reports_api.py`:
+  budget-summary math against six commitments exercising every corner of
+  §6.10's grounding rule (including the "unavailable without a baseline"
+  case), export-blocked-409 naming the exact blocking commitment(s), export
+  succeeding twice into two distinct, independently-readable snapshots, a
+  real DB-trigger immutability check (direct `UPDATE` against the RLS-
+  enforced app role still rejected), PDF export exercised end-to-end via a
+  real headless Chromium, RLS via `report_snapshots`' project-join policy,
+  role-gating as an independent property (`project_manager` can view but not
+  export; `producer` can), FR-DEV-05's Risk-and-Deviation rollup, and the
+  scheduled-runner path (a due schedule produces a real `trigger='scheduled'`
+  snapshot; a second run within the same hour doesn't double-fire).
 
 **Already done, before this table existed** (the deterministic audit this plan is built on found
 these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle state machine, audit
