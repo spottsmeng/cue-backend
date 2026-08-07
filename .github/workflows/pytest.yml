@@ -49,6 +49,17 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
+      - name: Install Playwright browser
+        # app/reports/export_pdf.py's PDF export launches a real headless
+        # Chromium — `uv sync` only installs the playwright Python package,
+        # not the browser binary itself, which lives outside the venv in
+        # ~/.cache/ms-playwright and has to be fetched separately. A fresh
+        # runner has no such cache (unlike a long-lived dev machine, which
+        # is why this gap wasn't caught locally); --with-deps also installs
+        # the OS-level shared libraries headless Chromium needs that
+        # ubuntu-latest doesn't ship by default.
+        run: uv run playwright install --with-deps chromium
+
       - name: Start Postgres
         # Reuses docker-compose.yml directly (not a native Actions service
         # container) so db/init/01-create-app-role.sql actually runs — that
