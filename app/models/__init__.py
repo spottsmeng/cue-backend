@@ -7,6 +7,13 @@ from app.models.party import Party, ChannelIdentity
 from app.models.ontology import OntologyTerm
 from app.models.ledger import Commitment, Evidence, Deliverable, Milestone, Budget
 from app.models.audit import AuditLog
+from app.twin.models import (
+    Dependency,
+    MilestoneArchetype,
+    MilestoneArchetypeDependency,
+    MilestoneArchetypeItem,
+    TwinAuditLog,
+)
 
 __all__ = [
     "Base",
@@ -26,4 +33,9 @@ __all__ = [
     "User",
     "Membership",
     "Delegation",
+    "Dependency",
+    "MilestoneArchetype",
+    "MilestoneArchetypeDependency",
+    "MilestoneArchetypeItem",
+    "TwinAuditLog",
 ]

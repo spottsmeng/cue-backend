@@ -19,6 +19,7 @@ from app.core.db import get_session
 from app.identity.models import Delegation, Membership, User
 from app.identity.service import ADMIN_ROLES, accessible_project_ids, effective_roles
 from app.models import Project, Vertical
+from app.twin.service import UnknownArchetypeCode, materialize_archetype
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -91,14 +92,27 @@ async def create_project(
         client_name=body.client_name,
         venue=body.venue,
         timezone=body.timezone,
+        event_start=body.event_start,
+        event_end=body.event_end,
     )
     session.add(project)
-    await session.flush()  # need project.id for the membership rows below
+    await session.flush()  # need project.id for the membership/milestone rows below
 
     await _grant_membership(session, project.id, user.id, "administrator", user.id)
     for member in body.members:
         target = await _resolve_member(session, member.email)
         await _grant_membership(session, project.id, target.id, member.role, user.id)
+
+    # FR-TWN-02: seed the Twin graph right here, in the same transaction as
+    # project creation, rather than a follow-up call — there's no reason for
+    # a project to exist for even one request without the graph FR-TWN-01
+    # says it must have, and doing it inline means a client never has to
+    # remember a second step. `body.archetype_code` is optional (see
+    # app/twin/service.py's _resolve_archetype for the fallback).
+    try:
+        await materialize_archetype(session, project, body.archetype_code)
+    except UnknownArchetypeCode as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
     await session.commit()
     # No session.refresh() here: same reasoning as before this session —

@@ -22,11 +22,15 @@ from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.identity.tokens import mint_local_token
 from app.models import Base, Organisation, Party, Project
+from seed_data.event_production_archetype import ARCHETYPE_CODE, ARCHETYPE_DEPENDENCIES, ARCHETYPE_ITEMS, ARCHETYPE_NAME
+from seed_data.verticals import PLATFORM_VERTICALS
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 TEST_DB_NAME = "cue_test"
 ADMIN_URL = "postgresql+asyncpg://cue:cue@localhost:5432/cue"
 OWNER_TEST_URL = f"postgresql+asyncpg://cue:cue@localhost:5432/{TEST_DB_NAME}"
+
+EVENT_PRODUCTION_VERTICAL_CODE = next(code for code, _name in PLATFORM_VERTICALS if code == "event-production")
 
 # Tables never named directly in the per-test TRUNCATE. verticals genuinely
 # survives it (nothing being truncated is referenced *by* verticals in the
@@ -36,7 +40,18 @@ OWNER_TEST_URL = f"postgresql+asyncpg://cue:cue@localhost:5432/{TEST_DB_NAME}"
 # behaviour; not a bug — see _reseed_universal_ontology_terms below for how
 # that's handled, and the comment on _clean_between_tests for how this was
 # actually diagnosed).
-PRESERVE_TABLES = {"ontology_terms", "verticals", "alembic_version"}
+#
+# milestone_archetypes/milestone_archetype_items/milestone_archetype_dependencies
+# (app/twin/models.py) used to be immune to this entirely (no FK into
+# anything ever truncated). That stopped being true the moment
+# MilestoneArchetype gained its own `organisation_id` (the tenant-extension
+# tier, CUE-PRD.md §4.2.1) — now they sit on the exact same cascade chain
+# ontology_terms does, and need the same reseed treatment; see
+# _reseed_default_archetype below.
+PRESERVE_TABLES = {
+    "ontology_terms", "verticals", "alembic_version",
+    "milestone_archetypes", "milestone_archetype_items", "milestone_archetype_dependencies",
+}
 
 COMMITMENT_ACTS = [
     ("offer", "Offer", "提议"),
@@ -48,6 +63,33 @@ COMMITMENT_ACTS = [
     ("approve", "Approve", "批准"),
     ("escalate", "Escalate", "升级"),
     ("query", "Query", "询问"),
+]
+
+# Mirrors alembic/versions/83b72f2a9175's seed, same deliberate duplication
+# rationale as COMMITMENT_ACTS above (a migration is a frozen historical
+# artefact tests shouldn't import from). milestone_archetype_items.type_code
+# (app/twin/models.py) references these by code, so a test that exercises
+# create_project's archetype materialization needs them present, same as
+# every other test needs COMMITMENT_ACTS present.
+MILESTONE_TYPES = [
+    ("design_approval", "Design approval", "设计批准"),
+    ("artwork_submission", "Artwork submission", "美术稿提交"),
+    ("test_print", "Test print", "打样测试"),
+    ("shop_drawing_confirmation", "Shop drawing confirmation", "车间图确认"),
+    ("permit_issuance", "Permit issuance", "许可证签发"),
+    ("fnb_confirmation", "F&B confirmation", "餐饮确认"),
+    ("content_approval", "Content approval", "内容批准"),
+    ("contractor_move_in", "Contractor move-in", "承包商进场"),
+    ("exhibitor_check_in", "Exhibitor check-in", "参展商签到"),
+    ("load_in", "Load-in", "货物进场"),
+    ("rigging", "Rigging", "吊装"),
+    ("install", "Install", "安装"),
+    ("content_load", "Content load", "内容加载"),
+    ("exhibits_ready", "Exhibits ready", "展品就绪"),
+    ("rehearsal", "Rehearsal", "彩排"),
+    ("doors", "Doors", "开幕"),
+    ("strike", "Strike", "拆展"),
+    ("crate_collection", "Crate collection", "箱柜回收"),
 ]
 
 
@@ -177,12 +219,23 @@ def auth_headers(org_id: uuid.UUID, **kwargs) -> dict[str, str]:
 
 
 async def _reseed_universal_ontology_terms(conn) -> None:
-    """The 9 universal commitment_act terms, re-inserted after every
-    TRUNCATE. Not the seed migration's own logic reused — this is a separate,
-    deliberately duplicated copy, because a migration is a frozen historical
-    artefact tests should never import from; drifting from it would only
-    matter if the real migration's seed values changed, which is exactly the
-    kind of change that should be caught by re-running this suite anyway."""
+    """The 9 universal commitment_act terms, plus the 18 milestone_type terms
+    (vertical-pack scoped to event-production, per eed5a4da79f6's re-key —
+    see that migration's own comment for why universal-core stopped being
+    right once a second vertical became a real roadmap item), re-inserted
+    after every TRUNCATE. Not the seed migrations' own logic reused — this
+    is a separate, deliberately duplicated copy, because a migration is a
+    frozen historical artefact tests should never import from; drifting
+    from it would only matter if the real migration's seed values changed,
+    which is exactly the kind of change that should be caught by re-running
+    this suite anyway. (seed_data/ content, by contrast, IS imported
+    directly by both — see _reseed_default_archetype below for why that's a
+    different, lower-risk kind of sharing.)
+
+    Assumes `verticals` already has its event-production row — true from
+    the start of every test session, since eed5a4da79f6-onward runs as part
+    of `_run_migrations()` before any test executes, and `verticals` is
+    never truncated (PRESERVE_TABLES, and nothing cascades into it)."""
     await conn.execute(
         text(
             "INSERT INTO ontology_terms "
@@ -193,6 +246,90 @@ async def _reseed_universal_ontology_terms(conn) -> None:
         [
             {"code": code, "label_en": label_en, "label_zh": label_zh, "sort_order": i}
             for i, (code, label_en, label_zh) in enumerate(COMMITMENT_ACTS)
+        ],
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO ontology_terms "
+            "(id, category, code, label_en, label_zh, vertical_id, sort_order, active, effective_from, version) "
+            "VALUES (gen_random_uuid(), 'milestone_type', :code, :label_en, :label_zh, "
+            "(SELECT id FROM verticals WHERE code = :vertical_code), :sort_order, true, now(), 1)"
+        ),
+        [
+            {
+                "code": code, "label_en": label_en, "label_zh": label_zh, "sort_order": i,
+                "vertical_code": EVENT_PRODUCTION_VERTICAL_CODE,
+            }
+            for i, (code, label_en, label_zh) in enumerate(MILESTONE_TYPES)
+        ],
+    )
+
+
+async def _reseed_default_archetype(conn) -> None:
+    """milestone_archetypes/items/dependencies, re-inserted after every
+    TRUNCATE — see PRESERVE_TABLES' comment for why these are now on the
+    same cascade chain ontology_terms is.
+
+    Unlike COMMITMENT_ACTS/MILESTONE_TYPES above, this imports seed_data/
+    directly instead of duplicating it: seed_data/ is not itself a
+    migration (no point-in-time DDL to drift from), just versioned content
+    both the migration and this fixture read the same way OntologyTerm rows
+    themselves are read by application code — the duplication upstream
+    exists specifically to catch a *migration's* seed values silently
+    drifting from what tests expect, which doesn't apply to a plain data
+    file with no historical-freeze requirement.
+    """
+    vertical_id = (
+        await conn.execute(
+            text("SELECT id FROM verticals WHERE code = :code"),
+            {"code": EVENT_PRODUCTION_VERTICAL_CODE},
+        )
+    ).scalar_one()
+
+    archetype_id = uuid.uuid4()
+    await conn.execute(
+        text(
+            "INSERT INTO milestone_archetypes (id, code, vertical_id, organisation_id, name, is_default) "
+            "VALUES (:id, :code, :vertical_id, NULL, :name, true)"
+        ),
+        {"id": archetype_id, "code": ARCHETYPE_CODE, "vertical_id": vertical_id, "name": ARCHETYPE_NAME},
+    )
+
+    item_ids_by_code: dict[str, uuid.UUID] = {code: uuid.uuid4() for code, *_ in ARCHETYPE_ITEMS}
+    await conn.execute(
+        text(
+            "INSERT INTO milestone_archetype_items "
+            "(id, archetype_id, sequence_order, type_code, name, day_offset, is_fixed) "
+            "VALUES (:id, :archetype_id, :sequence_order, :type_code, :name, :day_offset, :is_fixed)"
+        ),
+        [
+            {
+                "id": item_ids_by_code[type_code],
+                "archetype_id": archetype_id,
+                "sequence_order": i,
+                "type_code": type_code,
+                "name": name,
+                "day_offset": day_offset,
+                "is_fixed": is_fixed,
+            }
+            for i, (type_code, name, day_offset, is_fixed) in enumerate(ARCHETYPE_ITEMS)
+        ],
+    )
+    await conn.execute(
+        text(
+            "INSERT INTO milestone_archetype_dependencies "
+            "(id, archetype_id, upstream_item_id, downstream_item_id, lag_days) "
+            "VALUES (:id, :archetype_id, :upstream_item_id, :downstream_item_id, :lag_days)"
+        ),
+        [
+            {
+                "id": uuid.uuid4(),
+                "archetype_id": archetype_id,
+                "upstream_item_id": item_ids_by_code[upstream_code],
+                "downstream_item_id": item_ids_by_code[downstream_code],
+                "lag_days": lag_days,
+            }
+            for upstream_code, downstream_code, lag_days in ARCHETYPE_DEPENDENCIES
         ],
     )
 
@@ -328,3 +465,4 @@ async def _clean_between_tests(owner_engine):
         if tables:
             await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
         await _reseed_universal_ontology_terms(conn)
+        await _reseed_default_archetype(conn)

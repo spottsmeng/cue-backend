@@ -23,6 +23,7 @@ from app.ledger.audit import record_audit_event
 from app.ledger.extractor import _get_commitment_act_term
 from app.ledger.lifecycle import InvalidTransition, validate_transition
 from app.models import Commitment, Deliverable, Evidence, Party, Project
+from app.twin.service import recompute_on_commitment_transition
 
 _require_write = require_project_role(*WRITE_ROLES)
 
@@ -314,6 +315,17 @@ async def transition_commitment(
         from_state=from_state,
         to_state=body.to_state,
         detail={"reason": body.reason} if body.reason else {},
+    )
+    # FR-TWN-04: recompute the Twin within the same transaction/request when
+    # this transition's deliverable resolves to a milestone whose date is
+    # affected — see app/twin/service.py's recompute_on_commitment_transition
+    # for exactly what "affected" means here.
+    await recompute_on_commitment_transition(
+        session,
+        project_id=project.id,
+        commitment=commitment,
+        to_state=body.to_state,
+        actor_id=actor_id,
     )
     await session.commit()
     return await _to_out(session, commitment)

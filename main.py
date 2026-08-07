@@ -4,12 +4,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
 
 from app.api.commitments import router as commitments_router
+from app.api.milestones import router as milestones_router
 from app.api.projects import router as projects_router
+from app.api.twin import router as twin_router
 from app.core.db import get_session
 
 app = FastAPI(title="CUE")
 app.include_router(projects_router)
 app.include_router(commitments_router)
+app.include_router(milestones_router)
+app.include_router(twin_router)
 
 
 @app.get("/health")
