@@ -26,6 +26,7 @@ from app.foresight.models import (
     WebhookSubscription,
 )
 from app.reports.models import ReportScheduleConfig, ReportSnapshot
+from app.ask.models import AskConversation, AskTurn, RetrievalChunk
 
 __all__ = [
     "Base",
@@ -65,4 +66,7 @@ __all__ = [
     "ForesightAuditLog",
     "ReportSnapshot",
     "ReportScheduleConfig",
+    "RetrievalChunk",
+    "AskConversation",
+    "AskTurn",
 ]

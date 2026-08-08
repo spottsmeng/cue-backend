@@ -16,7 +16,7 @@ there yet.
 | M3 | Documents | `Prompt 6 — Documents.txt` | §15 Phase 8 | — | Done (2026-08-07) |
 | M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Done (2026-08-08) |
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Done (2026-08-08) |
-| M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Not started |
+| M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Done (2026-08-08) |
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Not started |
 | M8 | Real channel capture | `Prompt 11 — Real channel capture.txt` | §15 Phase 1 | M2, M4 | Not started — genuinely gated on Pico credentials; code is buildable now, real adapters aren't |
 | M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Not started |
@@ -502,6 +502,94 @@ config surface per Prompt 8's own "don't over-invest" instruction — see below)
   export; `producer` can), FR-DEV-05's Risk-and-Deviation rollup, and the
   scheduled-runner path (a due schedule produces a real `trigger='scheduled'`
   snapshot; a second run within the same hour doesn't double-fire).
+
+### M6 notes for later sessions
+
+Closed FR-ASK-01 through 08. FR-ASK-06's outbound *execution* half (the actual chase/draft/reschedule)
+is still out of scope until Write-back (M9) exists — but its own "do not fake an action taken
+response, say it can't do that yet" clause is closed this session too, structurally, not by prompt
+wording (see the intent-gating note below).
+
+- **New module `app/ask/`** — config, embeddings (Protocol + Ollama/TEI provider factory, mirroring
+  `app/llm/`'s shape but a genuinely separate interface, per Prompt 9's own instruction not to couple
+  the two), models, embed_worker, retrieve, schema, answer, summarise, brief, service — same
+  per-domain-module-owns-its-models precedent every prior domain module established.
+- **`DocumentVersion.embedding` (left unpopulated by M3 on purpose) is now populated**, by
+  `app/ask/embed_worker.py`'s periodic sweep, not synchronously on the request path. Evidence and
+  AuditLog text — which have nowhere else to hold an embedding/tsvector without widening a table
+  several other domains depend on — get their own new table, `RetrievalChunk` (`app/ask/models.py`),
+  rather than a second embedding column bolted onto either. Not a fourth: `Commitment` text is
+  reachable through its own required `Evidence` row (every commitment has at least one, per
+  CLAUDE.md's hard rule), so embedding Evidence already covers "the ledger" per FR-ASK-01, without a
+  separate index over `Commitment.deliverable_en`.
+- **Evidence has no RLS policy of its own** (checked every migration — commitments/budgets/documents/
+  document_versions/spec_claims/deviations all got a `tenant_isolation` policy; `evidence` never did,
+  and it has no `project_id` column either). `app/ask/embed_worker.py`'s `_evidence_for_project`
+  scopes it via an explicit join through whichever of the five subject FKs is set — the same "RLS
+  plus an independent application-level check" posture `app/api/deps.py`'s
+  `require_org_administrator` already documents elsewhere. Worth fixing at the source (an RLS policy
+  on `evidence` via the same five-way join) if a future session touches that table again, but out of
+  this session's own scope to retrofit.
+- **Hybrid retrieval is one function** (`app/ask/retrieve.py`'s `hybrid_retrieve`), fusing
+  `DocumentVersion` and `RetrievalChunk`'s lexical (`ts_rank`) and semantic (`pgvector` cosine
+  distance) signals via Reciprocal Rank Fusion rather than trying to normalise the two onto one scale
+  — RRF only needs each signal's ordering, which is the only thing either can actually be trusted to
+  give.
+- **FR-ASK-02's "say so, never assert" and FR-ASK-06's "say it can't do that yet, don't fake it" are
+  both Pydantic-enforced structural invariants, not prompt instructions** — `AskAnswerOut`
+  (`app/ask/schema.py`) has a `model_validator` that makes it impossible to construct an
+  `available=True` answer with zero citations or a `refusal_kind` set, or an `available=False` answer
+  that carries prose or omits a `refusal_kind`. The reasoning model proposes which retrieved excerpts
+  it used, but every proposed id is checked against the real retrieval hits before being trusted
+  (`app/ask/answer.py`'s `_resolve_citation` path) — a hallucinated id is silently dropped, never
+  passed through, same "verified in code, not trusted" discipline CLAUDE.md sets for extraction
+  evidence spans.
+- **FR-ASK-06's fake-action guard is a separate, schema-constrained classification step
+  (`app/ask/intent.py`'s `classify_intent`), not an instruction folded into the answer-generation
+  prompt** — telling the answering model "please don't fabricate an action" inside its own prompt
+  would not have been enforcement (that call's `answer` field is free text; nothing code-level would
+  stop it narrating "I've sent a message to the vendor" while citing real but action-unrelated
+  evidence). `answer_query` calls `classify_intent` first, on every request, and branches on its
+  result in plain code: an action-shaped request is refused with `refusal_kind:
+  "action_not_yet_supported"` before retrieval or the answer-generation call ever run — there is no
+  execution path in which the model capable of writing that fabricated sentence is invoked for such a
+  request, not a prompt asking it not to. `classify_intent` itself fails open (treated as "not an
+  action") if the reasoning model can't be reached at all, same NFR-AVL-03 degrade-gracefully posture
+  `_embed_question` already has for the embedding client, and for the same reason: an unreachable
+  reasoning model already breaks the answer-generation call a genuine question would need, so failing
+  open here doesn't introduce a new failure mode.
+- **FR-ASK-08's session-boundary rule is an explicit `conversation_id`, not time-based expiry** —
+  decided and documented in `app/ask/models.py`'s `AskConversation` docstring. A caller either omits
+  `conversation_id` (a new conversation is created and its id returned) or passes one back; there is
+  no server-side TTL. Chosen for determinism and testability over a wall-clock-dependent rule.
+- **`summarise`'s five variants reuse `app/reports/schema.py`'s row/field types directly**
+  (`ReportField`, `CommitmentSummary`, `DecisionLogRow`, `VendorStatusRow`) rather than a parallel set
+  — `vendor_status` even reuses `app/reports/composer.py`'s own `_compose_vendor_status` function
+  outright. FR-ASK-05 (outstanding actions by owner *and* by due window, in one call) is its own
+  variant, deliberately not treated as already covered by `GET /commitments`'s state/party/due-window
+  filters (Prompt 9's own instruction) — it groups the same open-commitment set two ways at once,
+  assistant-shaped rather than a filterable table.
+- **`successor-brief` is the same composer-pattern `app/reports/composer.py` established** (Prompt 8)
+  — one `compose_successor_brief()` calling one per-section async helper each, reusing that module's
+  own `_commitment_summary`/`_OPEN_RISK_STATUSES` rather than a second implementation.
+  `deviations_and_resolutions` deliberately includes every deviation, not just open ones (a handover
+  needs to see what was already resolved and how), unlike the Living WIP report's own risk/issues
+  section, which is current-only by design.
+- **`run_embedding_sweep` rides the existing arq worker**, same "don't stand up a second broker for
+  one more periodic job" reasoning M5's own `run_due_report_schedules` already established —
+  registered onto `app/foresight/worker.py`'s `WorkerSettings` alongside the other two.
+- Full coverage per Prompt 9's own testing expectation (`tests/test_ask_*.py`): citation-or-refuse
+  behaviour asserted on the typed fields directly (not string-sniffing), a hallucinated citation id
+  dropped, the answer-generation call provably never reached when retrieval finds nothing or the
+  request is action-shaped (`FakeReasoningClient.answer_calls` asserted empty — the intent
+  classification call itself still runs, always; see `tests/test_ask_answer.py`), an action-shaped
+  request refused with `refusal_kind="action_not_yet_supported"` without retrieval ever running
+  either, `classify_intent`'s own fail-open behaviour on an unreachable model
+  (`tests/test_ask_intent.py`), cross-project isolation on retrieval (two projects in the same org, a
+  query never crosses), successor-brief section completeness against a project seeded with one of
+  everything, RLS + role-gating as two independent properties (a `read_only` member can use every Ask
+  endpoint; a non-member is 404'd, not 403'd), and follow-up/conversation-ownership (a conversation id
+  from a different user is rejected).
 
 **Already done, before this table existed** (the deterministic audit this plan is built on found
 these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle state machine, audit

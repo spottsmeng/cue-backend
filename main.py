@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import Depends
 
 from app.api.admin import router as admin_router
+from app.api.ask import router as ask_router
 from app.api.budget import router as budget_router
 from app.api.channels import router as channels_router
 from app.api.commitments import router as commitments_router
@@ -39,6 +40,7 @@ app.include_router(webhooks_router)
 app.include_router(threshold_router)
 app.include_router(quiet_hours_router)
 app.include_router(reports_router)
+app.include_router(ask_router)
 
 
 @app.get("/health")

@@ -56,6 +56,7 @@ uv run fastapi dev main.py
 | `app/twin/` | Production Twin (PRD §6.8): CPM slack/critical-path, archetype seeding, hypothetical-shift propagation |
 | `app/documents/` | Documents (PRD §6.6): versioned storage, OCR/parsing stand-in, spec-claim extraction |
 | `app/foresight/` | Foresight (PRD §6.9/§6.7/§6.15): Silence Radar, contradiction/spec-drift detection, forecast heuristic, escalation, Deviations, notification core — see its own section below |
+| `app/ask/` | Ask & retrieval (PRD §6.11): embedding client (Ollama/TEI), hybrid lexical+semantic retrieval, query/summarise/successor-brief composers, follow-up sessions |
 | `cue-eval/` | Extraction prompt/schema tuning harness — see its own README |
 | `scripts/extract_fixtures.py` | Runs cue-eval's fixture cases through the real pipeline |
 
@@ -74,12 +75,15 @@ Run the worker locally:
 uv run arq app.foresight.worker.WorkerSettings
 ```
 
-It registers one cron job, `run_foresight_sweep`, on a 15-minute schedule — for every
+It registers three cron jobs, all on the same 15-minute schedule: `run_foresight_sweep` — for every
 non-archived project across every organisation, in order: Silence Radar, contradiction/spec-drift
 detection, the forecast heuristic, the FR-LCY-03 due-time-passed sweep, escalation, and webhook
-delivery of any notification past its `deliverable_at` (FR-NTF-04). `run_foresight_sweep` is a
-plain async function with no queue-specific dependency on its `ctx` argument, so it's also directly
-callable — by tests, or a one-off ops invocation — without a running worker or broker at all.
+delivery of any notification past its `deliverable_at` (FR-NTF-04); `run_due_report_schedules`
+(FR-RPT-09); and `run_embedding_sweep` (`app/ask/embed_worker.py`) — populates
+`DocumentVersion.embedding` and `RetrievalChunk` rows (Evidence/AuditLog text) for Ask's hybrid
+retrieval, per project, in bounded batches. Each is a plain async function with no queue-specific
+dependency on its `ctx` argument, so all three are also directly callable — by tests, or a one-off
+ops invocation — without a running worker or broker at all.
 
 Connection settings (`app/foresight/config.py`'s `ArqSettings`) default to `docker-compose.yml`'s
 `valkey` service (`localhost:6379`) and are overridable via `CUE_ARQ_REDIS_HOST`/`CUE_ARQ_REDIS_PORT`,

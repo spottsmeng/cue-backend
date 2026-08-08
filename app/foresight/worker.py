@@ -17,6 +17,7 @@ from arq.connections import RedisSettings
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
+from app.ask.embed_worker import run_embedding_sweep
 from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.foresight.config import get_arq_settings
@@ -122,15 +123,16 @@ class WorkerSettings:
     `cron_jobs`/`redis_settings` attributes, referenced by dotted path on
     the command line (module docstring).
 
-    `run_due_report_schedules` (FR-RPT-09, app/reports/schedule.py) rides
-    this same worker process rather than standing up a second arq/Valkey
-    pair — Prompt 8's own instruction not to over-invest in scheduling
-    machinery beyond the Must-priority reporting items. Not a Foresight
-    concern living here by accident; this class is simply the one
-    background-job process this codebase runs at all.
+    `run_due_report_schedules` (FR-RPT-09, app/reports/schedule.py) and
+    `run_embedding_sweep` (Prompt 9, app/ask/embed_worker.py) both ride this
+    same worker process rather than standing up a second arq/Valkey pair —
+    the same "don't over-invest in scheduling machinery" instruction Prompt
+    8 gave, applied again here. Not a Foresight concern living here by
+    accident; this class is simply the one background-job process this
+    codebase runs at all.
     """
 
-    functions = [run_foresight_sweep, run_due_report_schedules]
+    functions = [run_foresight_sweep, run_due_report_schedules, run_embedding_sweep]
     # Every 15 minutes — frequent enough that a real silence/forecast/
     # escalation condition surfaces promptly, infrequent enough not to
     # hammer Postgres with a full-tenant scan; not tuned against any
@@ -142,5 +144,6 @@ class WorkerSettings:
     cron_jobs = [
         cron(run_foresight_sweep, minute=set(range(0, 60, 15))),
         cron(run_due_report_schedules, minute=set(range(0, 60, 15))),
+        cron(run_embedding_sweep, minute=set(range(0, 60, 15))),
     ]
     redis_settings = RedisSettings(host=_arq_settings.redis_host, port=_arq_settings.redis_port)
