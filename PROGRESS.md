@@ -17,7 +17,7 @@ there yet.
 | M4 | Foresight | `Prompt 7 — Foresight.txt` | §15 Phase 5 | M1, M3 | Done (2026-08-08) |
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Done (2026-08-08) |
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Done (2026-08-08) |
-| M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Not started |
+| M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Done (2026-08-08) |
 | M8 | Real channel capture | `Prompt 11 — Real channel capture.txt` | §15 Phase 1 | M2, M4 | Not started — genuinely gated on Pico credentials; code is buildable now, real adapters aren't |
 | M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Not started |
 | M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Not started |
@@ -211,9 +211,17 @@ which no demo shortcut changes.
   - Selected via `CUE_SHAREPOINT_PROVIDER=noop|graph` (`app/documents/config.py`'s
     `SharePointSettings`), same env-driven provider-switch shape `app/llm/factory.py` already
     established for Ollama/Anthropic. Nothing about the adapter is Pico-specific — it targets
-    whichever tenant/site the config points at, so a free Microsoft 365 Developer Program sandbox
-    tenant works identically to Pico's real one for demo purposes; swapping to Pico's tenant later
-    is a credentials change, not a code change.
+    whichever tenant/site the config points at, so any Microsoft 365 sandbox tenant works
+    identically to Pico's real one for demo purposes; swapping to Pico's tenant later is a
+    credentials change, not a code change.
+    **Correction (2026-08-08):** this note originally said the Microsoft 365 Developer Program
+    sandbox tenant was free — that's no longer true. As of this date, enrolling requires an
+    active paid Microsoft subscription (e.g. Visual Studio subscription); there is no cost-free
+    path to a real `GraphSharePointAdapter` sandbox anymore. Testing this adapter for real now
+    means either paying for that subscription tier or Pico's own tenant credentials — `noop`
+    (already the default) is the only genuinely free path for demo/testing purposes, same as
+    every other channel adapter now has to be treated (see M8's own notes once that milestone
+    exists).
   - App-only (client-credentials) auth via `msal`, `Sites.ReadWrite.All` application permission.
     `ConfidentialClientApplication` construction is deliberately lazy (first token acquisition, not
     adapter construction) — MSAL unconditionally performs a live OIDC tenant-discovery network call
@@ -590,6 +598,115 @@ wording (see the intent-gating note below).
   everything, RLS + role-gating as two independent properties (a `read_only` member can use every Ask
   endpoint; a non-member is 404'd, not 403'd), and follow-up/conversation-ownership (a conversation id
   from a different user is rejected).
+
+### M7 notes for later sessions
+
+Closed FR-VRG-01 through 05 and 07 (Must); FR-VRG-06 (Should) is a structurally-honest
+placeholder, not a real pipeline — see below.
+
+- **New module `app/parties/`** — models, compute, service, reliability, schema — same
+  per-domain-module-owns-its-models precedent every prior domain module established. Prompt 10's
+  own text named `app/vrg/compute.py`; the real path is `app/parties/compute.py` instead, because
+  `app/reports/composer.py`'s M5-era stub already committed to `from app.parties.reliability import
+  get_reliability_metrics` (its own comment: "starts resolving real metrics automatically the day
+  M7 adds that module") — `app/parties/` is the name that import actually needs, and the REST
+  resource is `/parties/{id}/reliability` (§11.2) either way, so this session followed the real
+  constraint already in the codebase over the prompt's own suggested path.
+- **The supersedes/revision-churn decision: option (a), "structurally absent, not zero."**
+  Confirmed at the start of this session (grep for `supersedes` outside its own model declaration)
+  that FR-LED-05 (supersession detection/linking) has never been implemented by any prior session —
+  `Commitment.supersedes` has never been written to. Building a minimal supersession-linking
+  mechanism as a side effect of this milestone (option b) would have meant implementing a Must-
+  priority Ledger requirement (FR-LED-05) that isn't this session's job, on top of a metric that's
+  supposed to consume it, not produce its input data. Instead, `app/parties/compute.py`'s
+  `compute_revision_churn`/`compute_price_drift` both run a real, live structural check
+  (`_supersedes_data_exists` — does *any* commitment in this org have a non-empty `supersedes`
+  array right now) and report `value=None`/`unavailable_reason` naming FR-LED-05 by number when it
+  doesn't, rather than a hardcoded "not implemented" flag or a fabricated `0.0`. The computation
+  logic itself is real and tested (`tests/test_parties_compute.py`'s
+  `test_revision_churn_and_price_drift_compute_once_supersedes_exists` hand-writes a `supersedes`
+  chain directly to prove it) — the day a future session implements FR-LED-05, both metrics start
+  reporting real numbers automatically, no change needed here, same "wired for the day the
+  dependency arrives" idiom this milestone reused from `app/reports/composer.py`'s own
+  `_VRG_AVAILABLE` guard.
+- **FR-VRG-02's two missing segmentation columns were added this session, deliberately minimal**:
+  `Party.vendor_category_term_id` (the `vendor_category` ontology_terms category, named in a comment
+  since the very first migration but never wired to an actual column — `seed_data/vendor_categories.py`
+  + migration `09bcd1591445`, vertical-scoped from the start per `deviation_class`'s own precedent,
+  not repeating `milestone_type`'s original universal-core mistake) and `Party.city` (a plain nullable
+  string — a vendor's city has no taxonomy or reuse need of its own, unlike vendor category).
+  `Project.archetype_code` (migration `f0c711e76ab4`) is new too: `MilestoneArchetype` is a template,
+  never referenced again after `materialize_archetype` copies it (M1's own notes), so nothing
+  previously recorded which archetype a project actually resolved to — this column is the only place
+  that survives now, set once inside `materialize_archetype` itself. Setting it on an
+  already-flushed `Project` row triggers `updated_at`'s server-side `onupdate`, which expires that
+  attribute — `app/api/projects.py`'s `create_project` needed the same explicit
+  `session.refresh(project, attribute_names=["updated_at"])` fix `app/api/commitments.py`'s
+  `_refresh_updated_at` already documents elsewhere (found by the full suite actually failing on
+  `ResponseValidationError`, not by inspection).
+- **`vendor_metrics` (`app/parties/models.py`'s `VendorMetric`) is append-only history, not
+  upsert-in-place** — every `recompute_vendor_metrics` call (FR-VRG-03) writes a fresh row per
+  (metric, `segment_event_archetype`) pair rather than updating an existing one, which is what makes
+  §11.2's "history" operation (`GET /parties/{id}/reliability/history`) meaningful at all; "metrics"
+  (the current snapshot) is just the latest row per segment via a `DISTINCT ON` query
+  (`app/parties/reliability.py`). RLS follows Party's own org-direct pattern (`organisation_id`
+  denormalised onto every row, policy shaped like `organisations`/`foresight_thresholds`), not the
+  project-join shape most tenant-scoped tables use — Party itself is org-scoped, per its own
+  docstring, and this milestone deliberately computes a vendor's metrics across every project they've
+  touched in the org, not narrowed to one (unlike Silence Radar's own project-scoped baseline, which
+  this session changed the *consumer* side of — see below — without changing that baseline's own
+  narrower definition, since `tests/test_foresight_silence.py` still exercises it directly by name).
+- **FR-VRG-04 is a real integration, not just a note**: `app/foresight/silence.py`'s
+  `compute_vendor_baseline` now delegates to `app/parties/compute.py`'s
+  `compute_median_response_time_days` (project-scoped) instead of owning that query itself, and
+  `scan_silence` now prefers the *org-wide* figure (the same function, called with no project filter)
+  over the project-only one, falling back only when the org-wide figure isn't computable yet.
+  `tests/test_foresight_silence.py`'s `test_scan_silence_prefers_org_wide_vrg_baseline_over_project_only`
+  proves this changes real behaviour, not just an internal number nobody reads: the exact fixture that
+  flags a silence Risk under the old project-only baseline no longer flags once a second project's
+  history for the same vendor exists in the org.
+- **`app/reports/composer.py`'s `_compose_vendor_status` now actually calls
+  `get_reliability_metrics`** — M5's own stub already imported it behind an `ImportError` guard and
+  claimed "no change needed here" once M7 landed, but that claim was wrong: the guarded branch still
+  unconditionally built an `unavailable` `ReportField` regardless of `_VRG_AVAILABLE`, never calling
+  the function it had just imported. Fixed as part of this session (not deferred) since it directly
+  affects this milestone's own consumer-facing surface;
+  `tests/test_reports_api.py::test_vendor_status_reliability_resolves_once_vrg_has_a_metric` proves
+  a real on-time-rate figure now reaches the Living WIP report. `on_time_rate` was picked as the one
+  headline "reliability" scalar that section's single `ReportField` can carry — the full segmented
+  metric set lives at `/parties/{id}/reliability` itself, not duplicated into the report.
+- **FR-VRG-05 reuses `FINANCE_ROLES` (`{"finance", "producer"}`)**, per the Governance session's own
+  note that this milestone should. Since Party — and therefore this endpoint — is org-scoped, not
+  project-scoped, the existing `require_project_role` dependency doesn't apply (there's no
+  `project_id` in `/parties/{id}/reliability` to check membership against); `app/api/deps.py` gained
+  `require_org_finance`, the same "does this user hold role X on at least one project in their own
+  org" shape `require_org_administrator` already established for `/admin/*`, checked against
+  `FINANCE_ROLES` instead of `{"administrator"}`.
+- **FR-VRG-06 (Should) is implemented exactly as the prompt scoped it — a filterable query parameter,
+  not a pipeline** — and, on inspection, deliberately *not* wired to real data this session.
+  "Cross-Pico-office aggregation" in this codebase's multi-tenant model means cross-*organisation*
+  (each Pico office is its own `organisation_id` tenant boundary); genuinely aggregating a vendor's
+  metrics across orgs would need both an RLS bypass (a new, deliberate exception to CUE-Tech-Stack.md
+  P1, the kind this codebase has only ever made for the arq worker's own project-discovery sweep) and
+  a way to know two `Party` rows in different orgs are "the same vendor" at all, which nothing in
+  this schema establishes. Building either was judged out of a Should-priority item's scope for this
+  session — `vendor_category`/`city`/`event_archetype` on the existing single-party endpoint are the
+  real, working segmentation FR-VRG-02 asks for; FR-VRG-06 itself is intentionally left for a future
+  session with an actual cross-org vendor-identity mechanism to build against.
+- **FR-VRG-07 ("never expose a vendor's metrics to another vendor")** — per the prompt's own note,
+  satisfied by construction (P1 has no vendor-facing surface anywhere in this codebase), proven
+  explicitly rather than left as an assumption:
+  `tests/test_parties_reliability_api.py::test_no_auth_header_is_401_no_vendor_facing_route` asserts
+  the one route this milestone adds rejects a request with zero credentials outright (401, not even a
+  403 that would imply the route is reachable to try a role against).
+- Full coverage per Prompt 10's own testing expectation: exact-value metric computation against
+  hand-built commitment histories (`tests/test_parties_compute.py`, including the
+  supersedes-unavailable-then-available pair), the append-only-history/segmentation-by-archetype
+  write path (`tests/test_parties_service.py`), RLS and role-gating as two independent properties
+  plus cross-vendor isolation and the no-vendor-facing-route proof
+  (`tests/test_parties_reliability_api.py`), the FR-VRG-04 Silence Radar behaviour change
+  (`tests/test_foresight_silence.py`), and the FR-RPT-02 vendor-status wiring fix
+  (`tests/test_reports_api.py`).
 
 **Already done, before this table existed** (the deterministic audit this plan is built on found
 these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle state machine, audit

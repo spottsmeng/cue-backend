@@ -37,6 +37,19 @@ class Project(Base, UUIDPk, Timestamped):
     event_start: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
     event_end: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
     archived_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
+    archetype_code: Mapped[str | None] = mapped_column(
+        default=None,
+        comment=(
+            "FR-VRG-02's 'event archetype' segmentation axis. Set once, at "
+            "materialize_archetype time (app/twin/service.py), to whichever "
+            "MilestoneArchetype was actually resolved for this project — "
+            "that table is a template copied from and never referenced "
+            "again afterward (backend/PROGRESS.md's M1 notes), so this is "
+            "the only place a project's own archetype choice survives. "
+            "Null for a project materialized before this column existed, "
+            "or one whose vertical/org had no archetype to resolve at all."
+        ),
+    )
 
 
 class Channel(Base, UUIDPk, Timestamped):

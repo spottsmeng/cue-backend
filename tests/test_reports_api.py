@@ -14,7 +14,7 @@ properties.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -24,7 +24,7 @@ from sqlalchemy.exc import DBAPIError
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.ledger.extractor import _get_commitment_act_term
-from app.models import Budget, Commitment, Evidence, Project
+from app.models import AuditLog, Budget, Commitment, Evidence, Project
 from app.reports.composer import compute_budget_summary
 from app.reports.models import ReportSnapshot
 from main import app
@@ -419,6 +419,57 @@ async def test_report_snapshots_isolated_via_project_join_rls(app_session, org_a
         select(ReportSnapshot).where(ReportSnapshot.id == snapshot.id)
     )
     assert result.scalar_one_or_none() is None
+
+
+# --- FR-VRG-04-adjacent: vendor status resolves real reliability data ----
+
+
+@pytest.mark.asyncio
+async def test_vendor_status_reliability_resolves_once_vrg_has_a_metric(
+    app_session, authed_org_and_project, parties
+):
+    """M5's own note (this file's module-level context, backend/PROGRESS.md's
+    M5 section) promised vendor_status's reliability field "starts resolving
+    real metrics automatically the day M7 adds that module" — this proves
+    that's actually true against the real composer code, not just the
+    import succeeding. A vendor with a real on-time-rate metric computed
+    shows up `available=True` with the real value; reliability_data_available
+    flips to True for the whole section."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    vendor, internal = parties
+    await set_org_context(app_session, org_id)
+
+    due = datetime.now(timezone.utc) + timedelta(days=1)
+    commitment = await _make_commitment(
+        app_session, project_id, vendor, internal, state="delivered"
+    )
+    commitment.due_at = due
+    await app_session.flush()
+    app_session.add(
+        AuditLog(
+            project_id=project_id, commitment_id=commitment.id, action="state_transition",
+            actor_id=admin.id, from_state="committed", to_state="delivered", occurred_at=due,
+        )
+    )
+    await app_session.commit()
+
+    from app.parties.service import recompute_vendor_metrics
+
+    await recompute_vendor_metrics(app_session, vendor.id)
+    await app_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        current = await client.get(
+            f"/projects/{project_id}/report/current", headers=_headers(admin_token)
+        )
+
+    assert current.status_code == 200, current.text
+    section = current.json()["vendor_status"]
+    assert section["reliability_data_available"] is True
+    vendor_row = next(r for r in section["vendors"] if r["party_id"] == str(vendor.id))
+    assert vendor_row["reliability"]["available"] is True
+    assert vendor_row["reliability"]["value"] == pytest.approx(1.0)
 
 
 # --- FR-DEV-05: deviations roll into the risk and issues section --------

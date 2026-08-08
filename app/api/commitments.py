@@ -24,6 +24,7 @@ from app.ledger.audit import record_audit_event
 from app.ledger.extractor import _get_commitment_act_term
 from app.ledger.lifecycle import InvalidTransition, validate_transition
 from app.models import Commitment, Deliverable, Evidence, Party, Project
+from app.parties.service import recompute_vendor_metrics
 from app.twin.service import recompute_on_commitment_transition
 
 _require_write = require_project_role(*WRITE_ROLES)
@@ -329,6 +330,9 @@ async def transition_commitment(
         to_state=body.to_state,
         actor_id=actor_id,
     )
+    # FR-VRG-03: metrics update as commitments resolve, not on a batch
+    # schedule — same integration point as the Twin recompute just above.
+    await recompute_vendor_metrics(session, commitment.party_id)
     await session.commit()
     return await _to_out(session, commitment)
 

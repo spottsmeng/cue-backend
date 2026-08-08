@@ -62,19 +62,21 @@ from app.reports.schema import (
 from app.twin.service import compute_current
 
 # FR-RPT-02's vendor status summary degrades gracefully when the Vendor
-# Reliability Graph (M7, backend/PROGRESS.md — "Not started" as of this
-# session) doesn't exist yet, per Prompt 8's own explicit instruction: "check
-# backend/PROGRESS.md for M7's status and branch accordingly, don't
-# hard-fail." Attempting the import is that check in code — there is no
-# app/parties/ package at all yet (confirmed: no such module in this
-# codebase), so this always takes the except branch today, and starts
-# resolving real metrics automatically the day M7 adds that module, with no
-# change needed here.
+# Reliability Graph (M7) doesn't exist yet, per Prompt 8's own explicit
+# instruction: "check backend/PROGRESS.md for M7's status and branch
+# accordingly, don't hard-fail." M7 (Prompt 10) added app/parties/ and this
+# import now succeeds — real metrics resolve below, per that session's own
+# note that no change would be needed here beyond this import starting to
+# work. The try/except stays (rather than becoming an unconditional import)
+# so this module still degrades honestly if a future refactor ever removes
+# app/parties/ again, same posture the rest of this codebase takes for
+# every other optional cross-milestone dependency (app/parties/compute.py's
+# own Deviation-availability guard, for one).
 try:
-    from app.parties.reliability import get_reliability_metrics  # type: ignore[import-not-found]
+    from app.parties.reliability import get_reliability_metrics
 
     _VRG_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - exercised only in a build without M7
     _VRG_AVAILABLE = False
 
 _COMMITTED_STATES = ("committed", "at_risk", "delivered")
@@ -293,10 +295,30 @@ async def _compose_vendor_status(session: AsyncSession, project: Project) -> Ven
     vendor_rows = []
     for party, commitments in by_party.values():
         if _VRG_AVAILABLE:
-            reliability = ReportField(
-                value=None, available=False,
-                unavailable_reason="Vendor Reliability Graph resolver did not return a metric",
-            )
+            # FR-VRG-01's on-time commitment rate is this section's
+            # headline "reliability" figure — the single metric closest to
+            # what "reliability" plainly means to a Producer skimming this
+            # report; the full metric set (median response time, revision
+            # churn, price drift, deviation frequency), segmented, lives at
+            # §11.2's own /parties/{id}/reliability, not duplicated here.
+            metrics = await get_reliability_metrics(session, party.id)
+            on_time = metrics.get("on_time_rate")
+            if on_time is None:
+                reliability = ReportField(
+                    value=None, available=False,
+                    unavailable_reason="no on-time-rate metric has been computed for this vendor yet",
+                )
+            else:
+                reliability = ReportField(
+                    value=on_time.value,
+                    available=on_time.available,
+                    unavailable_reason=on_time.unavailable_reason,
+                    provenance=[
+                        ReportProvenance(
+                            source_type="vendor_metric", source_id=None, label="on_time_rate"
+                        )
+                    ],
+                )
         else:
             reliability = ReportField(
                 value=None,

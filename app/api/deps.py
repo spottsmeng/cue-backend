@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_session
 from app.identity.models import Membership, User
-from app.identity.service import effective_roles, resolve_user
+from app.identity.service import FINANCE_ROLES, effective_roles, resolve_user
 from app.identity.tokens import TokenVerificationError, get_token_verifier
 from app.models import Project
 
@@ -149,5 +149,41 @@ async def require_org_administrator(
         raise HTTPException(
             status_code=403,
             detail="administrator role required on at least one project in this organisation",
+        )
+    return user
+
+
+async def require_org_finance(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """FR-VRG-05: "expose [the Vendor Reliability Graph] to Procurement with
+    appropriate access control." Party is org-scoped, not project-scoped
+    (app/models/party.py's own docstring — "the same vendor contact is one
+    row across every project they appear in"), so
+    `/parties/{id}/reliability` can't be gated by `require_project_role`
+    the way every project-scoped resource in this codebase is — there is no
+    `project_id` in that URL to check membership against. This answers the
+    same *shape* of question `require_org_administrator` above already
+    does ("does this user hold a given role on at least one project in
+    their own organisation"), against `FINANCE_ROLES`
+    (app/identity/service.py — `{"finance", "producer"}`) instead of
+    `{"administrator"}`. The PRD's own persona table merges "Finance" and
+    "Procurement" into one persona and FR-ADM-01's role enum has no
+    separate "Procurement" value, so this reuses that tier outright rather
+    than inventing a ninth role — the same decision backend/PROGRESS.md's
+    M2 notes already flagged this milestone should make.
+    """
+    is_org_finance = (
+        await session.execute(
+            select(Membership.id)
+            .where(Membership.user_id == user.id, Membership.role.in_(FINANCE_ROLES))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if is_org_finance is None:
+        raise HTTPException(
+            status_code=403,
+            detail="finance/procurement role required on at least one project in this organisation",
         )
     return user

@@ -4,6 +4,7 @@ timestamps (CLAUDE.md/Prompt 7's own testing expectation: real fixtures,
 not mocks).
 """
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -13,6 +14,7 @@ from app.foresight.models import Risk
 from app.foresight.silence import compute_vendor_baseline, scan_silence
 from app.ledger.extractor import _get_commitment_act_term
 from app.models import AuditLog, Commitment, Evidence, Project
+from app.parties.compute import compute_median_response_time_days
 from tests.conftest import set_org_context
 
 NOW = datetime.now(timezone.utc)
@@ -167,6 +169,49 @@ async def test_scan_silence_does_not_duplicate_an_unchanged_open_risk(app_sessio
         await app_session.execute(select(Risk).where(Risk.project_id == project_id, Risk.source == "silence"))
     ).scalars().all()
     assert len(all_silence_risks) == 1
+
+
+@pytest.mark.asyncio
+async def test_scan_silence_prefers_org_wide_vrg_baseline_over_project_only(
+    app_session, org_and_project, parties, seeded_vertical_id
+):
+    """FR-VRG-04: Silence Radar now prefers the Vendor Reliability Graph's
+    org-wide median response time over this project's own narrower history.
+    Same fixture shape as
+    test_scan_silence_flags_gap_past_baseline_and_computes_consequence
+    above (a ~2-day project-only baseline, 6 days silent, which that test
+    proves flags on its own) — but this vendor also has a much slower
+    cadence in a *second* project in the same org (evidence spanning three
+    ~30-day gaps). Once that second project's history exists, the org-wide
+    median (30 days, pulled up by the wider gaps) must dominate — the exact
+    same 6-day silence that flagged before must no longer flag, proving
+    scan_silence is really reading the wider dataset, not just returning a
+    bigger number nobody consults."""
+    org_id, project_id = org_and_project
+    vendor, internal = parties
+    await set_org_context(app_session, org_id)
+    project = (await app_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+
+    await _make_committed_commitment(
+        app_session, project_id, vendor.id, internal.id, evidence_offsets_days=[10, 8, 6]
+    )
+
+    second_project = Project(
+        id=uuid.uuid4(), organisation_id=org_id, vertical_id=seeded_vertical_id,
+        name="Second Project", timezone="Asia/Singapore",
+    )
+    app_session.add(second_project)
+    await app_session.flush()
+    await _make_committed_commitment(
+        app_session, second_project.id, vendor.id, internal.id,
+        evidence_offsets_days=[100, 70, 40], state="delivered",
+    )
+
+    org_wide = await compute_median_response_time_days(app_session, vendor.id)
+    assert org_wide.value == pytest.approx(30.0, abs=0.01)
+
+    risks = await scan_silence(app_session, project)
+    assert risks == []  # would have flagged under the project-only 2.0-day baseline
 
 
 @pytest.mark.asyncio

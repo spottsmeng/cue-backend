@@ -27,6 +27,7 @@ from app.foresight.models import (
 )
 from app.reports.models import ReportScheduleConfig, ReportSnapshot
 from app.ask.models import AskConversation, AskTurn, RetrievalChunk
+from app.parties.models import VendorMetric
 
 __all__ = [
     "Base",
@@ -69,4 +70,5 @@ __all__ = [
     "RetrievalChunk",
     "AskConversation",
     "AskTurn",
+    "VendorMetric",
 ]

@@ -227,6 +227,11 @@ async def materialize_archetype(
     archetype = await _resolve_archetype(session, project, archetype_code)
     if archetype is None:
         return []
+    # FR-VRG-02: the only place a project's resolved archetype survives
+    # past this call (MilestoneArchetype itself is a template, never
+    # referenced again — see this function's own docstring and Project's
+    # own archetype_code comment).
+    project.archetype_code = archetype.code
 
     items = (
         await session.execute(

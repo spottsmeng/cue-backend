@@ -103,6 +103,7 @@ async def apply_automatic_transition(
     transaction boundary.
     """
     from app.ledger.audit import record_audit_event
+    from app.parties.service import recompute_vendor_metrics
     from app.twin.service import recompute_on_commitment_transition
 
     from_state = commitment.state
@@ -123,3 +124,7 @@ async def apply_automatic_transition(
     await recompute_on_commitment_transition(
         session, project_id=project_id, commitment=commitment, to_state=to_state, actor_id=None,
     )
+    # FR-VRG-03: an automatic transition (silence/forecast-triggered) is
+    # still a commitment resolving — same recompute app/api/commitments.py's
+    # transition_commitment triggers for a manual one.
+    await recompute_vendor_metrics(session, commitment.party_id)

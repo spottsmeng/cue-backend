@@ -10,6 +10,7 @@ from app.foresight.threshold import resolve_threshold
 from app.ledger import lifecycle
 from app.models import Commitment, Evidence, Project
 from app.foresight.models import Risk
+from app.parties.compute import compute_median_response_time_days
 
 # FR-FOR-01/02 (PRD §6.9): Silence Radar. Detects an expected-but-absent
 # response by comparing the live gap since a vendor's last contact against
@@ -24,34 +25,36 @@ from app.foresight.models import Risk
 # something once there's a live obligation to respond about (a `proposed`
 # offer going quiet is a sales problem, not yet a delivery risk).
 #
-# The baseline sample is this project's own history with the vendor, not
-# the vendor's history across every project in the org — simpler to reason
-# about and test; widening the sample once there's demand for it (a vendor
-# genuinely fresh to this project but well-known elsewhere in the org) is a
-# documented, deliberate follow-on, not an oversight.
+# FR-VRG-04: the baseline now prefers the Vendor Reliability Graph's own
+# org-wide median response time (app/parties/compute.py's
+# `compute_median_response_time_days`, the vendor's history across every
+# project in this org) over this project's own narrower history — the
+# "widening the sample... a documented, deliberate follow-on" this module's
+# own comment used to promise here. Falls back to `compute_vendor_baseline`
+# (this project's own history only) when the org-wide figure isn't
+# computable yet (a vendor genuinely fresh everywhere in the org, or fewer
+# than 3 evidence timestamps org-wide) — never silently treated as "no
+# baseline at all" while a narrower-but-real one is available.
 
 
 async def compute_vendor_baseline(session: AsyncSession, project_id, party_id) -> float | None:
     """Median gap (days) between consecutive Evidence.sent_at timestamps
-    across this vendor's commitments in this project. None ("no baseline
-    yet") when fewer than 3 timestamps exist — two points give exactly one
-    delta, not enough to call a pattern a baseline."""
-    stmt = (
-        select(Evidence.sent_at)
-        .join(Commitment, Commitment.id == Evidence.commitment_id)
-        .where(Commitment.project_id == project_id, Commitment.party_id == party_id)
-        .order_by(Evidence.sent_at)
-    )
-    timestamps = (await session.execute(stmt)).scalars().all()
-    if len(timestamps) < 3:
-        return None
-    deltas = sorted(
-        (b - a).total_seconds() / 86400.0 for a, b in zip(timestamps, timestamps[1:]) if b > a
-    )
-    if not deltas:
-        return None
-    mid = len(deltas) // 2
-    return deltas[mid] if len(deltas) % 2 else (deltas[mid - 1] + deltas[mid]) / 2
+    across this vendor's commitments *in this project only*. None ("no
+    baseline yet") when fewer than 3 timestamps exist — two points give
+    exactly one delta, not enough to call a pattern a baseline.
+
+    FR-VRG-04: this used to own that computation outright; it now delegates
+    to app/parties/compute.py's `compute_median_response_time_days`
+    (project-scoped) rather than duplicating the query — same computation,
+    same threshold, same result, per Prompt 10's own "reuse this
+    computation rather than writing a second one" instruction. Kept as its
+    own function (rather than inlined at both call sites) because
+    tests/test_foresight_silence.py exercises it directly, and because
+    `scan_silence` below still needs it by name as the fallback when the
+    Vendor Reliability Graph's own org-wide baseline isn't computable yet.
+    """
+    result = await compute_median_response_time_days(session, party_id, project_id=project_id)
+    return result.value
 
 
 async def compute_base_rate(session: AsyncSession, project_id, party_id) -> float | None:
@@ -100,8 +103,16 @@ async def scan_silence(session: AsyncSession, project: Project) -> list[Risk]:
     baseline_cache: dict = {}
     for commitment in commitments:
         if commitment.party_id not in baseline_cache:
-            baseline_cache[commitment.party_id] = await compute_vendor_baseline(
-                session, project.id, commitment.party_id
+            # FR-VRG-04: prefer the Vendor Reliability Graph's own org-wide
+            # baseline (this vendor's history across every project in the
+            # org); fall back to this project's own narrower history only
+            # when the org-wide figure isn't computable yet — see this
+            # module's own top-of-file comment.
+            org_wide = await compute_median_response_time_days(session, commitment.party_id)
+            baseline_cache[commitment.party_id] = (
+                org_wide.value
+                if org_wide.value is not None
+                else await compute_vendor_baseline(session, project.id, commitment.party_id)
             )
         baseline_days = baseline_cache[commitment.party_id]
         if baseline_days is None:

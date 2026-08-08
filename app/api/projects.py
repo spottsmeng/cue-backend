@@ -116,10 +116,17 @@ async def create_project(
     except UnknownArchetypeCode as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
 
+    # FR-VRG-02: materialize_archetype now sets project.archetype_code when
+    # an archetype resolves, which is a real UPDATE on an already-flushed
+    # row — Project.updated_at's server-side onupdate=func.now() means
+    # SQLAlchemy expires it after that flush (it can't know the
+    # server-computed value without asking), the same MissingGreenlet trap
+    # app/api/commitments.py's `_refresh_updated_at` documents. Refresh it
+    # explicitly, before commit (while app.current_org_id, is_local=true, is
+    # still set for this transaction) rather than let ProjectOut's response
+    # serialization trigger a lazy-load outside the async greenlet bridge.
+    await session.refresh(project, attribute_names=["updated_at"])
     await session.commit()
-    # No session.refresh() here: same reasoning as before this session —
-    # app.current_org_id (is_local=true) doesn't survive past the commit, and
-    # expire_on_commit=False means it isn't needed anyway.
     return project
 
 
