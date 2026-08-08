@@ -138,11 +138,18 @@ async def test_nextcloud_capture_sees_externally_uploaded_file():
 @pytest.mark.skipif(not _IMAP_SMTP_CONFIGURED, reason="CUE_IMAP_SMTP_* not configured")
 @pytest.mark.asyncio
 async def test_imap_smtp_send_and_fetch_backlog_round_trip():
-    adapter = ImapSmtpAdapter(ImapSmtpSettings())
+    settings = ImapSmtpSettings()
+    adapter = ImapSmtpAdapter(settings)
     channel = _channel("imap_smtp")
     marker = f"live-test-{uuid.uuid4().hex[:8]}"
 
-    await adapter.send(channel, to_external_id="cue@cue.test", text=f"Quote ready, {marker}")
+    # Self-send: the mailbox this adapter monitors (settings.from_address,
+    # falling back to the AUTH username) is also the recipient — the same
+    # shape the round trip needs regardless of backend (greenmail's one
+    # dynamic mailbox vs. a real external inbox, which has no second
+    # address of its own to send to/from here).
+    to_address = settings.from_address or settings.username
+    await adapter.send(channel, to_external_id=to_address, text=f"Quote ready, {marker}")
 
     since = datetime.now(timezone.utc) - timedelta(minutes=5)
     matched = [m async for m in adapter.fetch_backlog(channel, since=since) if marker in (m.text or "")]

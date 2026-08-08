@@ -800,6 +800,28 @@ detection, FR-DOC-09), read this section — the foundation those items build on
     `pytest.mark.skipif`-gated integration tests (skip cleanly with no local `.env` credentials
     configured; fail for real, not skip, if configured but the containers are down — the correct
     signal, not something to paper over).
+- **`backend/.env`'s email block now points at a real Google Workspace mailbox (credentials in
+  `.env`, gitignored — not named here), not `greenmail`** — driven by an explicit product requirement: dev/test/demo
+  need genuine send-and-receive round trips, not protocol-level-only testing against a closed-loop
+  double (GreenMail accepts SMTP and stores in memory; it never relays to or receives from the real
+  mail network in either direction — confirmed, not a config gap). Gmail's IMAP/SMTP is TLS-secured
+  by default, matching `ImapSmtpSettings`' own secure defaults exactly (`imap_use_ssl`/
+  `smtp_use_starttls` both `True`) — the swap touched zero adapter code, only `.env` values, which is
+  itself the proof the protocol-not-vendor design argument actually holds.
+  - **Real test bug this surfaced**: `test_imap_smtp_send_and_fetch_backlog_round_trip` hardcoded
+    `to_external_id="cue@cue.test"` — harmless against greenmail (one dynamic mailbox, any address
+    resolves to it), silently wrong against a real external mailbox (the send would succeed but land
+    nowhere the test's own IMAP fetch would ever see, since a real mail system has no such address).
+    Fixed to self-send to `settings.from_address or settings.username` — the same shape works
+    correctly against either backend.
+  - GreenMail's config is kept, commented, directly below the Gmail block in `.env` — the fast,
+    no-live-inbox-traffic fallback for routine dev loops (rate limits, working offline) without
+    touching any code, same one-block swap in reverse.
+  - Tradeoff, stated plainly: every `uv run pytest` run now sends and receives one real email —
+    `uv run pytest` went from ~32s to ~67s, entirely Gmail's real network round trip, and a real
+    `Quote ready, live-test-<hash>` message lands in a real inbox on every run. Accepted deliberately,
+    not overlooked — matches the explicit "if a message needs to be sent/received, I need this to
+    genuinely happen" requirement driving this swap.
 
 ## Updating this file
 
