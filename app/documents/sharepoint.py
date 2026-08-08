@@ -1,14 +1,14 @@
-import asyncio
 import logging
 from functools import lru_cache
 from pathlib import PurePosixPath
 from typing import Protocol
 
 import httpx
-import msal
 
+from app.core.graph_auth import GraphConfigError, GraphSettings, GraphTokenProvider, get_graph_settings
 from app.documents.config import SharePointSettings, get_sharepoint_settings
 from app.documents.models import DocumentVersion
+from app.documents.nextcloud_client import NextcloudWebDavClient
 
 logger = logging.getLogger("cue.documents.sharepoint")
 
@@ -81,55 +81,23 @@ class GraphSharePointAdapter:
     error rather than a confusing failure if a file exceeds the limit.
     """
 
-    def __init__(self, settings: SharePointSettings):
-        if not (settings.tenant_id and settings.client_id and settings.client_secret):
-            raise SharePointConfigError(
-                "CUE_SHAREPOINT_PROVIDER=graph requires CUE_SHAREPOINT_TENANT_ID, "
-                "_CLIENT_ID and _CLIENT_SECRET"
-            )
+    def __init__(self, settings: SharePointSettings, graph_settings: GraphSettings | None = None):
+        # GraphConfigError (from GraphTokenProvider, below) covers the
+        # tenant/client credential half — this class only needs to add the
+        # site-specific half SharePointSettings still owns.
         if not settings.site_id and not (settings.site_hostname and settings.site_path):
             raise SharePointConfigError(
                 "CUE_SHAREPOINT_PROVIDER=graph requires either CUE_SHAREPOINT_SITE_ID, or both "
                 "CUE_SHAREPOINT_SITE_HOSTNAME and CUE_SHAREPOINT_SITE_PATH"
             )
+        try:
+            self._token_provider = GraphTokenProvider(graph_settings or get_graph_settings())
+        except GraphConfigError as e:
+            raise SharePointConfigError(
+                f"CUE_SHAREPOINT_PROVIDER=graph requires Graph credentials: {e}"
+            ) from e
         self._settings = settings
-        self._msal_app: msal.ConfidentialClientApplication | None = None
         self._resolved_site_id: str | None = settings.site_id
-
-    def _get_msal_app(self) -> msal.ConfidentialClientApplication:
-        # Built lazily, not in __init__: MSAL's ConfidentialClientApplication
-        # unconditionally performs a live OIDC tenant-discovery call against
-        # the configured tenant as part of construction (there is no flag
-        # to defer it — validate_authority only controls a *separate*
-        # instance-discovery check). Constructing this adapter must stay a
-        # pure, local operation — the same "construction is pure, real
-        # validation happens on first actual use" shape AnthropicClient
-        # (app/llm/client.py) already has for its own api_key — so the MSAL
-        # app, and the network call building it triggers, is deferred to
-        # the first token acquisition instead.
-        if self._msal_app is None:
-            self._msal_app = msal.ConfidentialClientApplication(
-                self._settings.client_id,
-                authority=f"https://login.microsoftonline.com/{self._settings.tenant_id}",
-                client_credential=self._settings.client_secret,
-            )
-        return self._msal_app
-
-    def _acquire_token_sync(self) -> str:
-        # msal's HTTP calls are synchronous under the hood (uses `requests`)
-        # — pushed through asyncio.to_thread same as storage.py does for
-        # the synchronous minio SDK, so it doesn't block the event loop.
-        result = self._get_msal_app().acquire_token_for_client(
-            scopes=["https://graph.microsoft.com/.default"]
-        )
-        if "access_token" not in result:
-            raise RuntimeError(
-                f"failed to acquire Graph token: {result.get('error_description', result)}"
-            )
-        return result["access_token"]
-
-    async def _acquire_token(self) -> str:
-        return await asyncio.to_thread(self._acquire_token_sync)
 
     async def _resolve_site_id(self, client: httpx.AsyncClient, token: str) -> str:
         if self._resolved_site_id:
@@ -153,7 +121,7 @@ class GraphSharePointAdapter:
         path = f"{folder}/{document_name}" if folder else document_name
 
         async with httpx.AsyncClient(timeout=60) as client:
-            token = await self._acquire_token()
+            token = await self._token_provider.acquire_token()
             site_id = await self._resolve_site_id(client, token)
             # Path-addressed "upload or replace content" — Graph creates
             # any missing intermediate folders automatically, so
@@ -174,6 +142,37 @@ class GraphSharePointAdapter:
         )
 
 
+class NextcloudWriteBackAdapter:
+    """FR-DOC-07's write-back target, built ahead of Pico's Microsoft Graph
+    credentials against a real Nextcloud instance (CUE-PRD.md §9.3a) —
+    genuinely functional, not a sandbox pretending to be Pico's. Same
+    "one file per Document, overwritten each version" reading of FR-DOC-07
+    GraphSharePointAdapter's own docstring already argues for — Nextcloud's
+    own built-in file versioning then shows the approval trail natively,
+    the same role SharePoint's version history plays for the Graph path.
+    """
+
+    def __init__(self, settings: SharePointSettings):
+        if not (settings.nextcloud_base_url and settings.nextcloud_username
+                 and settings.nextcloud_app_password):
+            raise SharePointConfigError(
+                "CUE_SHAREPOINT_PROVIDER=nextcloud requires CUE_SHAREPOINT_NEXTCLOUD_BASE_URL, "
+                "_NEXTCLOUD_USERNAME and _NEXTCLOUD_APP_PASSWORD"
+            )
+        self._settings = settings
+        self._client = NextcloudWebDavClient(
+            settings.nextcloud_base_url, settings.nextcloud_username, settings.nextcloud_app_password
+        )
+
+    async def write_back(self, version: DocumentVersion, document_name: str, content: bytes) -> None:
+        folder = self._settings.nextcloud_remote_folder.strip("/")
+        path = f"{folder}/{document_name}" if folder else document_name
+        await self._client.put(path, content, "application/octet-stream")
+        logger.info(
+            "sharepoint write-back (nextcloud): document_version=%s -> path=%r", version.id, path
+        )
+
+
 @lru_cache
 def get_sharepoint_adapter() -> SharePointAdapter:
     settings = get_sharepoint_settings()
@@ -181,4 +180,6 @@ def get_sharepoint_adapter() -> SharePointAdapter:
         return NoOpSharePointAdapter()
     if settings.provider == "graph":
         return GraphSharePointAdapter(settings)
+    if settings.provider == "nextcloud":
+        return NextcloudWriteBackAdapter(settings)
     raise ValueError(f"unknown CUE_SHAREPOINT_PROVIDER: {settings.provider!r}")

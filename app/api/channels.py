@@ -9,7 +9,7 @@ from app.api.deps import get_project, require_project_role
 from app.api.schemas import ChannelCreate, ChannelHealthSignal, ChannelOut
 from app.core.db import get_session
 from app.identity.service import ADMIN_ROLES
-from app.models import Channel, Project
+from app.models import Channel, ChannelType, Project
 
 # FR-ADM-06 names "attach channels" as part of project provisioning, the same
 # admin-tier surface app/api/projects.py's add_member already gates with
@@ -31,6 +31,23 @@ async def _refresh_updated_at(session: AsyncSession, channel: Channel) -> None:
     fetching it eagerly, and a bare attribute access later would trigger a
     lazy-load outside the async greenlet bridge."""
     await session.refresh(channel, attribute_names=["updated_at"])
+
+
+async def _resolve_channel_type(session: AsyncSession, code: str, *, require_capability: bool) -> str:
+    """channel_types.code replaced ChannelTypeLiteral's static closed set
+    (app/api/schemas.py) — validity is now a DB lookup, not a Python type,
+    since the whole point of the reference-data table is that a new code is
+    an insert, not a code change. `require_capability=True` is the FK-free
+    equivalent of the old Literal's own "minus manual" carve-out: a Channel
+    resource can never be "manual" (that value exists only for
+    Evidence.channel's non-integration case, FR-LED-10)."""
+    stmt = select(ChannelType.code).where(ChannelType.code == code, ChannelType.active.is_(True))
+    if require_capability:
+        stmt = stmt.where(ChannelType.capability.is_not(None))
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=422, detail=f"unknown or non-attachable channel type: {code!r}")
+    return row
 
 
 async def _get_channel(session: AsyncSession, project: Project, channel_id: uuid.UUID) -> Channel:
@@ -64,7 +81,8 @@ async def attach_channel(
     """FR-ADM-06: 'attach channels' — the half of project provisioning the
     RBAC/delegation session left for this one (create/assign members was
     already built)."""
-    channel = Channel(project_id=project.id, type=body.type, external_ref=body.external_ref, healthy=True)
+    channel_type = await _resolve_channel_type(session, body.type, require_capability=True)
+    channel = Channel(project_id=project.id, type=channel_type, external_ref=body.external_ref, healthy=True)
     session.add(channel)
     await session.commit()
     return channel

@@ -4,6 +4,7 @@ from app.models.vertical import Vertical
 from app.models.organisation import Organisation
 from app.models.project import Project, Channel
 from app.models.party import Party, ChannelIdentity
+from app.models.channel_type import ChannelType
 from app.models.ontology import OntologyTerm
 from app.models.ledger import Commitment, Evidence, Deliverable, Milestone, Budget
 from app.models.audit import AuditLog
@@ -37,6 +38,7 @@ __all__ = [
     "Channel",
     "Party",
     "ChannelIdentity",
+    "ChannelType",
     "OntologyTerm",
     "Commitment",
     "Evidence",

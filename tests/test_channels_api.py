@@ -87,6 +87,43 @@ async def test_producer_can_attach_channel(app_session, authed_org_and_project):
 
 
 @pytest.mark.asyncio
+async def test_attach_channel_with_unknown_type_422s(authed_org_and_project):
+    """Replaces ChannelTypeLiteral's static closed set with a DB lookup
+    (app/api/channels.py's _resolve_channel_type) — same client-visible 422
+    a bad Literal value used to produce, now for a code no channel_types
+    row exists for."""
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/projects/{project_id}/channels",
+            headers=_headers(admin_token),
+            json={"type": "telegram"},
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_attach_channel_with_manual_type_422s(authed_org_and_project):
+    """'manual' is FR-LED-10's non-integration Evidence.channel value
+    (capability=None) — a Channel resource can never be attached as
+    'manual', the same carve-out ChannelTypeLiteral (minus "manual")
+    enforced before it was replaced by _resolve_channel_type's
+    require_capability=True check."""
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/projects/{project_id}/channels",
+            headers=_headers(admin_token),
+            json={"type": "manual"},
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_list_channels(authed_org_and_project):
     org_id, project_id, _admin, admin_token = authed_org_and_project
 

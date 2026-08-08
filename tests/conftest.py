@@ -22,6 +22,7 @@ from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.identity.tokens import mint_local_token
 from app.models import Base, Organisation, Party, Project
+from seed_data.channel_types import CHANNEL_TYPES
 from seed_data.deviation_classes import DEVIATION_CLASSES
 from seed_data.event_production_archetype import ARCHETYPE_CODE, ARCHETYPE_DEPENDENCIES, ARCHETYPE_ITEMS, ARCHETYPE_NAME
 from seed_data.vendor_categories import VENDOR_CATEGORIES
@@ -50,9 +51,14 @@ EVENT_PRODUCTION_VERTICAL_CODE = next(code for code, _name in PLATFORM_VERTICALS
 # tier, CUE-PRD.md §4.2.1) — now they sit on the exact same cascade chain
 # ontology_terms does, and need the same reseed treatment; see
 # _reseed_default_archetype below.
+#
+# channel_types (app/models/channel_type.py) is on the same chain for the
+# same reason — its own `organisation_id` FK into organisations — from the
+# moment it was added; see _reseed_channel_types below.
 PRESERVE_TABLES = {
     "ontology_terms", "verticals", "alembic_version",
     "milestone_archetypes", "milestone_archetype_items", "milestone_archetype_dependencies",
+    "channel_types",
 }
 
 COMMITMENT_ACTS = [
@@ -435,6 +441,21 @@ async def _reseed_default_archetype(conn) -> None:
     )
 
 
+async def _reseed_channel_types(conn) -> None:
+    """channel_types cascade-wipes on every TRUNCATE the same way
+    ontology_terms/milestone_archetypes do (organisation_id FK into
+    organisations — see PRESERVE_TABLES' own comment). Imports seed_data/
+    directly, not a duplicated copy — same lower-risk sharing
+    _reseed_default_archetype's own docstring explains for ARCHETYPE_ITEMS."""
+    await conn.execute(
+        text(
+            "INSERT INTO channel_types (id, code, capability, active) "
+            "VALUES (gen_random_uuid(), :code, :capability, true)"
+        ),
+        [{"code": code, "capability": capability} for code, capability in CHANNEL_TYPES],
+    )
+
+
 @pytest_asyncio.fixture(scope="session")
 async def seeded_vertical_id(owner_engine) -> uuid.UUID:
     """One shared 'event-production' vertical row, created once per session
@@ -567,3 +588,4 @@ async def _clean_between_tests(owner_engine):
             await conn.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
         await _reseed_universal_ontology_terms(conn)
         await _reseed_default_archetype(conn)
+        await _reseed_channel_types(conn)

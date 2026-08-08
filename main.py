@@ -6,6 +6,7 @@ from fastapi import Depends
 from app.api.admin import router as admin_router
 from app.api.ask import router as ask_router
 from app.api.budget import router as budget_router
+from app.api.channel_types import router as channel_types_router
 from app.api.channels import router as channels_router
 from app.api.commitments import router as commitments_router
 from app.api.consent import router as consent_router
@@ -30,6 +31,7 @@ app.include_router(milestones_router)
 app.include_router(twin_router)
 app.include_router(budget_router)
 app.include_router(channels_router)
+app.include_router(channel_types_router)
 app.include_router(consent_router)
 app.include_router(retention_router)
 app.include_router(admin_router)

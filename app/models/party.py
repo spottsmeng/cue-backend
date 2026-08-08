@@ -5,7 +5,6 @@ from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.base import Base, Timestamped, UUIDPk
-from app.models.project import ChannelType
 
 PartyType = Enum("person", "vendor_org", "internal_staff", name="party_type")
 
@@ -51,7 +50,7 @@ class ChannelIdentity(Base, UUIDPk, Timestamped):
     party_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("parties.id"), index=True
     )
-    channel_type: Mapped[str] = mapped_column(ChannelType)
+    channel_type: Mapped[str] = mapped_column(ForeignKey("channel_types.code"))
     external_id: Mapped[str] = mapped_column(comment="phone / WeChat ID / UPN / email")
     confidence: Mapped[float] = mapped_column(default=1.0)
     manually_verified: Mapped[bool] = mapped_column(default=False)

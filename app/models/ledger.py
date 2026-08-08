@@ -6,7 +6,6 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.base import Base, Timestamped, TZDateTime, UUIDPk
-from app.models.project import ChannelType
 
 # Fixed, structural state machines (PRD §6.5, §4.3) — not domain vocabulary that
 # grows over time, so these stay native enums rather than ontology_terms rows.
@@ -190,7 +189,10 @@ class Evidence(Base, UUIDPk):
         default=None,
         comment="Points at the future Message/capture table — not modelled yet (Phase 1: Capture)",
     )
-    channel: Mapped[str] = mapped_column(ChannelType)
+    channel: Mapped[str] = mapped_column(
+        comment="provenance tag — channel_types.code by convention, but not FK-enforced: "
+        "a display/audit label, not an adapter-selection key"
+    )
     sent_at: Mapped[datetime] = mapped_column(TZDateTime)
     language: Mapped[str] = mapped_column(comment="bcp47")
     original_text: Mapped[str] = mapped_column(comment="never overwritten")

@@ -23,20 +23,18 @@ MembershipRoleLiteral = Literal[
     "administrator", "delegate", "read_only",
 ]
 
-# Mirrors app/models/project.py's ChannelType native enum, minus "manual" —
-# that value exists for Evidence.channel's "not captured off a channel at
-# all" case (FR-LED-10), never a meaningful type for an attachable Channel.
-ChannelTypeLiteral = Literal["whatsapp", "wechat", "teams", "outlook", "sharepoint"]
+# app/models/channel_type.py's ChannelType is reference data (insertable
+# rows), not a native enum, since the whole point is that a brand can be
+# added without a code/schema change — so unlike the Literals around it,
+# channel-type values are no longer a static Python type. Validity is
+# checked at request time against the channel_types table instead (see
+# app/api/channels.py's _resolve_channel_type); the wire type for both
+# Channel.type (never "manual" — see _resolve_channel_type's
+# require_capability flag) and Evidence.channel (genuinely can be "manual",
+# FR-LED-10's "manually-entered-but-fully-real" posture) is plain `str`.
 
 # Mirrors app/models/governance.py's ConsentStatus native enum.
 ConsentStatusLiteral = Literal["pending", "accepted", "objected", "opted_out"]
-
-# Mirrors app/models/project.py's ChannelType native enum, *including*
-# "manual" — unlike ChannelTypeLiteral above (Channel-the-resource can never
-# be "manual"), Evidence.channel genuinely can be, and a document's evidence
-# is exactly an Evidence row (FR-LED-10's "manually-entered-but-fully-real"
-# posture, reused here for FR-DOC-01 ingestion).
-EvidenceChannelLiteral = Literal["whatsapp", "wechat", "teams", "outlook", "sharepoint", "manual"]
 
 # Mirrors app/documents/models.py's SpecClaimAttribute native enum.
 SpecClaimAttributeLiteral = Literal["dimension", "finish", "quantity", "price"]
@@ -409,7 +407,7 @@ class ChannelOut(BaseModel):
 
     id: uuid.UUID
     project_id: uuid.UUID
-    type: ChannelTypeLiteral
+    type: str
     external_ref: str | None
     healthy: bool
     created_at: datetime
@@ -417,10 +415,27 @@ class ChannelOut(BaseModel):
 
 
 class ChannelCreate(BaseModel):
-    """FR-ADM-06's 'attach channels' step."""
+    """FR-ADM-06's 'attach channels' step. `type` is validated against the
+    channel_types table at request time, not a static Literal — see
+    app/api/channels.py's _resolve_channel_type."""
 
-    type: ChannelTypeLiteral
+    type: str
     external_ref: str | None = None
+
+
+class ChannelTypeOut(BaseModel):
+    """GET /channel-types — read-only discovery of valid `Channel.type` /
+    `Evidence.channel` values, since they're no longer a closed Literal a
+    client can introspect statically. Not the tenant-facing Configuration UI
+    (no create/edit here) — just the read counterpart GET /projects/{id}/
+    channels already established as acceptable scope for a discoverable
+    resource."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    code: str
+    capability: str | None
+    active: bool
 
 
 class ChannelHealthSignal(BaseModel):
@@ -549,7 +564,7 @@ class DocumentCreate(BaseModel):
 
     name: str
     class_code: str | None = None
-    channel: EvidenceChannelLiteral = "manual"
+    channel: str = "manual"
     sent_at: datetime | None = None
     language: str = "en"
     original_text: str | None = None
