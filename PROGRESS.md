@@ -18,7 +18,7 @@ there yet.
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Done (2026-08-08) |
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Done (2026-08-08) |
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Done (2026-08-08) |
-| M8 | Real channel capture | `Prompt 11 — Real channel capture.txt` | §15 Phase 1 | M2, M4 | Not started — genuinely gated on Pico credentials; code is buildable now, real adapters aren't |
+| M8 | Real channel capture | `Prompt 11 — Real channel capture.txt` | §15 Phase 1 | M2, M4 | Not started on Prompt 11's full scope (queue, normaliser, identity resolver, media pipeline, ASR, consent, gap detection) — genuinely gated on Pico credentials for WhatsApp/WeChat/Graph either way. Registry groundwork landed ahead of schedule (see M8 notes below): `channel_types` reference table + `ChannelAdapter` Protocol + FOSS adapters (Mattermost/IMAP-SMTP/Nextcloud), so the rest of this milestone builds on an open registry, not the closed enum it originally would have |
 | M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Not started |
 | M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Not started |
 
@@ -713,6 +713,93 @@ these solid): PRD Phase 2 (Ledger — extraction, evidence provenance, lifecycle
 trail) and a real slice of Phase 9 (RBAC, project-scoped membership, time-boxed delegation, its own
 append-only audit trail). See `CUE-PRD.md`'s audit artifact (link kept by the user) for the full
 per-requirement evidence.
+
+### M8 notes for later sessions
+
+Registry/schema groundwork landed ahead of Prompt 11's own scheduled start, driven by a product-
+strategy clarification: CUE is a multi-tenant SaaS intended to support a different tenant's own
+3rd-party channel stack, not just Pico's WhatsApp/WeChat/Microsoft 365 — the closed native
+`channel_type` Postgres enum Prompt 11 would otherwise have built directly on top of could never
+deliver that (adding a brand meant an `ALTER TYPE` migration touching every tenant). Before starting
+the rest of Prompt 11 (queue, normaliser, identity resolver, media pipeline, ASR, consent, gap
+detection, FR-DOC-09), read this section — the foundation those items build on changed shape.
+
+- **`channel_types` reference table** (`app/models/channel_type.py`) replaces `ChannelType`, the
+  native enum `app/models/project.py` used to define — same "reference data, not enums" instinct
+  `ontology_terms` already established (CUE-Tech-Stack.md §5.2 has the full reasoning for why this
+  is a second table, not folded into `ontology_terms` itself). `channels.type` and
+  `channel_identities.channel_type` are now FKs to `channel_types.code` (natural-key FK, not
+  `ontology_terms`' surrogate-id pattern); `evidence.channel` deliberately stayed a plain string, no
+  FK — it's a provenance/display label, not an adapter-selection key, and forcing an FK there
+  would've touched 15+ unrelated test fixtures for no behavioural benefit. `GET /channel-types` is
+  the read-only discovery endpoint replacing the old `ChannelTypeLiteral`/`EvidenceChannelLiteral`
+  static Literals.
+- **`app/capture/adapters/`** — the `ChannelAdapter` Protocol (`fetch_backlog`/`stream`/`send`/
+  `health`) Prompt 11 item 2 asked for, plus every adapter class: `FixtureAdapter` (wraps the
+  existing `app/capture/fixtures.py`, kept as the permanent dev/test backend, unchanged in behaviour),
+  `WhatsAppAdapter`/`WeChatWorkAdapter`/`GraphAdapter` (code-complete, credential-blocked — genuinely
+  untested against real Pico infrastructure, exactly Prompt 11's own accepted state for this
+  milestone), and three real, live-testable FOSS adapters standing in for the Microsoft-equivalent
+  capabilities until Pico's Entra ID app registration exists: `MattermostAdapter` (team_collaboration),
+  `ImapSmtpAdapter` (email), `NextcloudAdapter` (file_storage) — see CUE-PRD.md §9.3a. A single global
+  `CUE_CAPTURE_BACKEND=fixture|live` switch gates all of them uniformly (not nine per-channel
+  switches), so the full test suite stays credential-free regardless of which live adapters are
+  configured. `app/documents/sharepoint.py` gained a matching `NextcloudWriteBackAdapter` (outbound,
+  `CUE_SHAREPOINT_PROVIDER=nextcloud`) alongside its existing `noop`/`graph` providers, and its Graph
+  auth was extracted into `app/core/graph_auth.py::GraphTokenProvider`/`GraphSettings` so the
+  write-back adapter and the new capture-side `GraphAdapter` share one Entra ID credential
+  (`CUE_GRAPH_*`) instead of `SharePointSettings` keeping its own copy — a scoped env-var rename,
+  not a duplicated credential block. `tests/test_sharepoint_adapter.py` was updated for the new
+  two-settings-object shape (`GraphSharePointAdapter(settings, graph_settings)`); every other
+  existing test in the suite passed unmodified.
+- **Not yet built**: the ingestion queue, normaliser, identity resolver, media pipeline, ASR, consent
+  wiring, capture-health scheduling, gap detection/backfill, scheduled extraction windows, and
+  FR-DOC-09 — Prompt 11 items 3-12, still fully open. They now consume `get_adapter(channel.type)`
+  (`app/capture/adapters/registry.py`) and FK-backed `ChannelIdentity.channel_type` instead of the
+  closed enum, but none of that consumption exists yet.
+- **Mattermost/Nextcloud/GreenMail are real, running local instances, not just code** —
+  `docker-compose.yml` gained `nextcloud`, `mattermost` (+ dedicated `mattermost_postgres`, since
+  Mattermost has no SQLite support), and `greenmail` (a purpose-built open-source test mail server —
+  dynamic mode, one pre-configured mailbox, real IMAP/SMTP protocol without docker-mailserver's
+  domain/DKIM setup overhead). `mattermost/mattermost-team-edition` has no arm64 build — runs under
+  Docker Desktop's amd64 emulation (`platform: linux/amd64`) on Apple Silicon, confirmed working via
+  `docker manifest inspect`, just slower to start. Two real installer gotchas hit and fixed, both
+  worth knowing before touching this compose file again:
+  - Nextcloud's unattended-install entrypoint does **not** trigger from `NEXTCLOUD_ADMIN_USER`/
+    `_PASSWORD` alone, even for SQLite — it needs an explicit `SQLITE_DATABASE` env var too, or it
+    silently falls back to "finish setup via the web wizard" and never becomes `installed:true`.
+    Confirmed by reading the image's own `/entrypoint.sh`.
+  - The Mattermost image has **no shell, curl, or wget at all** (`docker exec ... sh` fails with
+    "executable file not found") — a `curl`-based `healthcheck:` override silently reports
+    permanently unhealthy. It ships its own image-baked `HEALTHCHECK` (`mmctl system status
+    --local`); don't override it, just don't define one in compose at all.
+  - Admin user, team (`cue-project`), channel (`vendor-updates`, id `ttjme9pe83d19geior9qbf5k3c`)
+    and bot account (`cue-capture-bot`) were provisioned via `mmctl` (bundled in the image) — bot
+    creation specifically requires a real authenticated session (`mmctl auth login`), `--local` mode
+    rejects it ("This command cannot be run in local mode"). Nextcloud's app password was minted via
+    `occ user:add-app-password cue --password-from-env` (full capabilities; without
+    `--password-from-env` it still creates one but with reduced capabilities). `CUE`/`CUE-Capture`
+    WebDAV folders were created for real via `MKCOL`, not assumed to pre-exist.
+  - `backend/.env` now carries this session's real local credentials for all three (Mattermost bot
+    token, Nextcloud app password, GreenMail mailbox) — `CUE_CAPTURE_BACKEND` and
+    `CUE_SHAREPOINT_PROVIDER` stay at their safe `fixture`/`noop` defaults regardless; flipping either
+    is a one-line change now that the credentials are already sitting there.
+  - **Real gap this surfaced in `ImapSmtpAdapter` itself** (not a GreenMail-only quirk — a genuine
+    adapter bug now fixed): it unconditionally called `starttls()`/used `IMAP4_SSL`, which breaks
+    against any plain-text test/dev mail server. Added `imap_use_ssl`/`smtp_use_starttls` toggles
+    (`app/capture/config.py`, both default `True` — real mail infrastructure always needs them; only
+    a plain local test server sets them `False`). Also split `username` (AUTH identity) from a new
+    `from_address` field (`From:` header / mailbox address) — GreenMail's AUTH only accepts the bare
+    local part (`cue`), not the full address (`cue@cue.test`), which a single conflated field can't
+    represent correctly against every real server. And `smtplib`'s default "initial response"
+    optimization for the LOGIN mechanism isn't universally supported (GreenMail rejects it outright)
+    — `conn.login(..., initial_response_ok=False)` is unconditionally the safer default.
+  - Verified end-to-end against the real containers (send → real fetch_backlog round trip, or a real
+    external upload → real fetch_backlog, plus a real health() call) for all three — not just
+    "constructs without raising." `tests/test_capture_adapters_live.py` codifies this as
+    `pytest.mark.skipif`-gated integration tests (skip cleanly with no local `.env` credentials
+    configured; fail for real, not skip, if configured but the containers are down — the correct
+    signal, not something to paper over).
 
 ## Updating this file
 

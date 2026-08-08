@@ -67,7 +67,111 @@ services:
       timeout: 3s
       retries: 30
 
+  # app/documents/sharepoint.py's NextcloudWriteBackAdapter and
+  # app/capture/adapters/nextcloud.py's NextcloudAdapter — the file_storage
+  # capability's FOSS substitute for SharePoint (CUE-PRD.md §9.3a), a real
+  # instance, not a sandbox pretending to be Pico's. SQLite-backed
+  # (NEXTCLOUD_ADMIN_* env vars trigger the official image's unattended
+  # installer on first boot) — deliberately not Postgres-backed like the
+  # `postgres` service above: this container exists purely as a WebDAV
+  # target for adapter testing, not a production deployment, and Nextcloud's
+  # own docs only warn against SQLite under concurrent multi-user load,
+  # which a single test adapter never produces.
+  nextcloud:
+    image: nextcloud:stable
+    environment:
+      NEXTCLOUD_ADMIN_USER: cue
+      NEXTCLOUD_ADMIN_PASSWORD: cue_nextcloud_secret
+      NEXTCLOUD_TRUSTED_DOMAINS: localhost
+      # The image's entrypoint only auto-runs `occ maintenance:install`
+      # (unattended setup) if a DB variable is explicitly present — even
+      # for SQLite, ADMIN_USER/PASSWORD alone isn't enough; confirmed by
+      # reading /entrypoint.sh inside the image.
+      SQLITE_DATABASE: nextcloud
+    ports:
+      - "8080:80"
+    volumes:
+      - cue_nextcloud_data:/var/www/html
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost/status.php | grep -q '\"installed\":true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  # Mattermost needs its own Postgres (no SQLite support) — a dedicated
+  # container rather than a second database on the `postgres` service
+  # above, so this stays swappable/removable independently of CUE's own
+  # schema-owning database.
+  mattermost_postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: mattermost
+      POSTGRES_PASSWORD: mattermost
+      POSTGRES_DB: mattermost
+    volumes:
+      - cue_mattermost_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mattermost -d mattermost"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # app/capture/adapters/mattermost.py's MattermostAdapter — the
+  # team_collaboration capability's FOSS substitute for Microsoft Teams
+  # (CUE-PRD.md §9.3a). No unattended-install env vars exist for Mattermost
+  # itself (unlike Nextcloud) — the admin account, team, channel and bot
+  # token are provisioned via `mmctl` after startup, see
+  # scripts/setup_mattermost.sh.
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    # No official arm64 build exists for this image (confirmed via `docker
+    # manifest inspect` — amd64 only) — forced to emulate on Apple Silicon
+    # via Docker Desktop's Rosetta/QEMU support. Slower than a native image,
+    # acceptable for local adapter testing.
+    platform: linux/amd64
+    depends_on:
+      mattermost_postgres:
+        condition: service_healthy
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: "postgres://mattermost:mattermost@mattermost_postgres:5432/mattermost?sslmode=disable"
+      MM_SERVICESETTINGS_SITEURL: "http://localhost:8065"
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+    ports:
+      - "8065:8065"
+    volumes:
+      - cue_mattermost_data:/mattermost/data
+    # No custom healthcheck: this image has no shell/curl/wget at all
+    # (confirmed — `docker exec ... sh` fails with "executable file not
+    # found"), so it ships its own HEALTHCHECK
+    # (`mmctl system status --local`, image-baked) — inherited as-is
+    # rather than overridden with something that can't run inside it.
+
+  # app/capture/adapters/imap_smtp.py's ImapSmtpAdapter — the email
+  # capability's FOSS substitute for Outlook (CUE-PRD.md §9.3a). GreenMail
+  # is a purpose-built open-source test mail server: dynamic mode accepts
+  # any username/password as a real mailbox with no provisioning step, so
+  # this exercises the real IMAP/SMTP protocol without docker-mailserver's
+  # domain/DKIM/account-setup overhead — appropriate for adapter testing,
+  # not a stand-in for a production mail stack.
+  greenmail:
+    image: greenmail/standalone:latest
+    environment:
+      GREENMAIL_OPTS: "-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.users=cue:cue_greenmail_secret@cue.test -Dgreenmail.hostname=0.0.0.0"
+    ports:
+      - "3025:3025"  # SMTP
+      - "3143:3143"  # IMAP
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/3143'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
 volumes:
   cue_postgres_data:
   cue_minio_data:
   cue_valkey_data:
+  cue_nextcloud_data:
+  cue_mattermost_postgres_data:
+  cue_mattermost_data:
