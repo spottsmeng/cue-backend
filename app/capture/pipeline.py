@@ -27,6 +27,7 @@ from app.documents.storage import StorageBackend, get_storage_backend
 from app.ledger.extractor import RejectedExtraction, extract_case
 from app.llm.client import ModelClient
 from app.models import Channel, Evidence, Party, Project
+from app.writeback.reply import handle_potential_reply
 
 logger = logging.getLogger("cue.capture.pipeline")
 
@@ -189,6 +190,19 @@ async def ingest_raw_message(
     result = await normalise_and_ingest(session, project=project, channel=channel, raw=raw)
     if result.message is None or not result.is_new:
         return result.message, result.is_new, 0, 0
+
+    # FR-WBK-06/07: rides this same pipeline, not a second inbound path —
+    # checked before extraction, on every newly-captured message, so a reply
+    # to a pending write-back is matched (transitioned or escalated) even if
+    # it also happens to contain language extract_from_message would try to
+    # read as a new commitment. Deliberately does not forward `client`
+    # (extract_case's extraction-role override) — reply parsing is a
+    # reasoning-role call (app/writeback/reply.py's own get_client("reasoning")
+    # default), a different model role than extraction, same distinction
+    # app/llm/factory.py's Role type draws everywhere else in this codebase.
+    await handle_potential_reply(
+        session, project=project, channel_id=channel.id, message=result.message
+    )
 
     media_processed = await process_pending_media_for_message(
         session,

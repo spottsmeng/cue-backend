@@ -40,6 +40,19 @@ class Project(Base, UUIDPk, Timestamped):
             "or one whose vertical/org had no archetype to resolve at all."
         ),
     )
+    writeback_daily_ceiling: Mapped[int] = mapped_column(
+        default=1,
+        comment=(
+            "FR-WBK-04's hard ceiling — outbound messages per group (channel) "
+            "per local calendar day, enforced by app/writeback/rate_limit.py "
+            "against real OutboundMessage rows, not an application counter. "
+            "Changed only via PATCH /projects/{id}/writeback/config "
+            "(ADMIN_ROLES-gated, audited via WritebackAuditLog) — never a "
+            "bare column write, per CLAUDE.md's 'no code path, including an "
+            "admin override, may exceed it without an explicit, audited "
+            "configuration change' instruction."
+        ),
+    )
 
 
 class Channel(Base, UUIDPk, Timestamped):

@@ -18,8 +18,14 @@ from app.models.ledger import CommitmentState
 # additions already established) is FR-LED-13's own structurally distinct
 # path — never folded into "corrected", since payment_status is Finance-set
 # and must never be inferred from message content the way a correction is.
+# "outbound_sent" (migration 9197d521030d, same ADD VALUE pattern) is
+# FR-WBK-08's own real send, logged through this shared trail per Prompt
+# 12's own instruction — a reply-driven transition still logs its own
+# separate "state_transition" row; the send itself is a distinct event on
+# the same commitment.
 AuditAction = Enum(
     "created", "verified", "corrected", "state_transition", "payment_status_updated",
+    "outbound_sent",
     name="audit_action",
 )
 

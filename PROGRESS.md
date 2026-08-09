@@ -19,7 +19,7 @@ there yet.
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Done (2026-08-08) |
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Done (2026-08-08) |
 | M8 | Real channel capture | `Prompt 11 — Real channel capture.txt`, `Prompt 11b — Real channel capture (continued).txt` | §15 Phase 1 | M2, M4 | **Done**, with the same per-adapter honesty this milestone has had since item 2: items 1, 3–12 all genuinely built and tested this session (see M8 notes below) — real for everything not credential-blocked (Mattermost/IMAP-SMTP/Nextcloud capture, identity resolution, party-org effective-dating, consent, capture health, gap reconciliation, scheduled windows, FR-DOC-09 drift) or dependency-blocked in this sandbox (PaddleOCR, FunASR SenseVoice — real FOSS substitutes run instead, see below); code-complete/credential-blocked for WhatsApp/WeChat/Graph, unchanged from item 2 |
-| M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Not started |
+| M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Done (2026-08-09) |
 | M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Not started |
 
 ### M1 notes for later sessions
@@ -953,6 +953,98 @@ GreenMail infrastructure throughout, zero mocks.
   Graph's `teams`/`outlook` are unchanged from item 2's own honest state. Graph's `sharepoint` gained a
   real `fetch_media` implementation (code-complete, same credential-blocked status as the rest of that
   adapter — genuinely untestable in this environment, not run against anything live).
+
+### M9 notes for later sessions
+
+Closed FR-WBK-01 through 08 in full. Builds entirely on M8's `ChannelAdapter.send()` — no new
+channel-level capability, exactly as Prompt 12 scoped it. FR-ASK-06's conversational-action wiring
+(chase a vendor via a natural-language Ask command) is the one named follow-up left undone, per
+Prompt 12's own EXPLICITLY OUT OF SCOPE section.
+
+- **New module `app/writeback/`** — models, schema, language, compose, rate_limit, audit, service,
+  reply — same per-domain-module-owns-its-models precedent every prior domain module established.
+- **`OutboundMessage` is always tied to the specific commitment decision it confirms**
+  (`commitment_id` NOT NULL) — both because that is genuinely what FR-WBK-01 asks for (PRD §5.2's
+  sequence diagram: "PM confirms decision -> write-back") and because `app/ledger/audit.py`'s
+  `record_audit_event`, which FR-WBK-08 requires every send to go through, itself requires a
+  non-NULL `commitment_id` (`app/models/audit.py`'s `AuditLog` docstring — confirmed before
+  designing around it, not discovered the hard way). `channel_id`/`to_external_id`/`language` are
+  all resolved once at draft time from the commitment's own real-capture Evidence (`Evidence.message_id
+  -> Message.channel_id` — item 1 of M8's own migration is what finally made that FK real) and frozen
+  on the row thereafter, never re-derived at send time.
+- **Draft/authorise/send are three structurally separate service calls, not one endpoint with a
+  flag** (`app/writeback/service.py`'s `draft_writeback`/`authorise_writeback`/`send_writeback`),
+  mirroring FR-LED-08's three-tap verification precedent per Prompt 12's own instruction. A DB CHECK
+  constraint (`outbound_message_status_field_consistency`) enforces the same invariant a second time
+  at the row level — `authorised_by`/`authorised_at`/`sent_at` can only be non-NULL in the status
+  each implies, so a direct UPDATE bypassing the service layer can't desynchronise them either.
+- **FR-WBK-04's rate ceiling is enforced by locking the `Channel` row itself**
+  (`SELECT ... FOR UPDATE`, `app/writeback/rate_limit.py`'s `reserve_send_slot`), not any
+  `OutboundMessage` row — there may be zero, one or several already-authorised-but-unsent rows for a
+  channel at once, none of which is a valid lock target on its own. The second of two concurrent
+  `send` calls for the same channel blocks on the lock until the first commits or rolls back, then
+  re-counts and correctly sees the true state — a real transactional check-then-insert, proven with
+  two genuinely independent `AsyncSession`s racing via `asyncio.gather`
+  (`tests/test_writeback_rate_limit.py::test_concurrent_sends_only_one_succeeds_once_ceiling_is_hit`),
+  not simulated. The ceiling itself is `Project.writeback_daily_ceiling` (new column, default 1),
+  changed only via `PATCH /projects/{id}/writeback/config` (`ADMIN_ROLES`-gated) and logged to this
+  domain's own new `WritebackAuditLog` — a ceiling change has no commitment to hang the shared,
+  commitment-scoped `AuditLog` off of, so it gets the same narrow, append-only, per-domain audit
+  table `ForesightAuditLog`/`DocumentAuditLog`/`TwinAuditLog` already established, rather than
+  widening the shared one for one non-commitment event.
+- **FR-WBK-02's language resolution reuses `app/capture/normalise.py`'s `detect_language` outright**
+  (`app/writeback/language.py`'s `resolve_channel_language`) — no second language-detection
+  mechanism. "The group's prevailing traffic" is read as the last 20 messages on that channel, any
+  author, concatenated and run through the same script-ratio heuristic capture already uses; falls
+  back to the commitment's own founding `Evidence.language` only when the channel has no real-capture
+  message history at all (a channel captured before M8, or in a sandbox with no traffic yet).
+- **FR-WBK-03's composition is schema-enforced, not prompt-requested** — CLAUDE.md's "enforce, don't
+  ask" discipline, applied here the same way as extraction: `COMPOSE_DRAFT_JSON_SCHEMA` constrains
+  the model's output shape, and `app/writeback/compose.py`'s `compose_draft` additionally verifies in
+  code (never trusted) that the returned text actually ends in a question mark (ASCII or full-width),
+  raising `ComposeError` rather than silently drafting non-question prose. `get_client("reasoning")`,
+  not `"extraction"` — composing a confirmation question is a generation/judgment task over a
+  commitment's current fields, the same role distinction `app/foresight/contradiction.py` already
+  draws for a comparable "not extraction" call.
+- **FR-WBK-06/07's reply handling rides `app/capture/pipeline.py`'s existing ingestion pipeline**
+  (`app/writeback/reply.py`'s `handle_potential_reply`, called from `ingest_raw_message` right after
+  a new `Message` is durably captured, before extraction runs) — no second inbound path. A reply is
+  matched to the most recent `sent`, not-yet-replied-to `OutboundMessage` on that channel sent before
+  the inbound message arrived; FR-WBK-04's own "at most one message per group per day" means there is
+  normally at most one candidate, so this is a defensive tie-break, not load-bearing logic. A
+  parseable reply that resolves to a valid transition goes through the *exact* write path a manual
+  transition uses (`validate_transition`, `record_audit_event` with a `"vendor reply"` detail,
+  `recompute_on_commitment_transition`, `recompute_vendor_metrics` — `actor_id=None`, same
+  system-triggered convention `app/ledger/extractor.py` and `apply_automatic_transition` already
+  establish). An unparseable reply, or one that would imply an invalid transition
+  (`app/ledger/lifecycle.py`'s `validate_transition` raising `InvalidTransition`), is never forced
+  through — both escalate identically, via `app/foresight/notification.py`'s existing
+  `default_recipients`/`create_notification` (Foresight, M4, is Done, so the real path was used, not
+  the minimal-Notification fallback Prompt 12 named for the case it hadn't run yet).
+- **Reply parsing's `to_state` is deliberately unconstrained in the LLM schema** (a free string, not
+  `CommitmentState`'s own enum) — a model that doesn't already know the commitment's current state
+  can't reliably pick from that state machine's full vocabulary anyway, and
+  `app/ledger/lifecycle.py`'s `validate_transition` is what actually decides validity afterward;
+  constraining the schema more tightly would just move the same failure mode one layer earlier
+  without removing it.
+- **`AuditAction` gained a sixth value, `outbound_sent`** (migration `9197d521030d`, same
+  `ALTER TYPE ... ADD VALUE` pattern `d7def2e27c7c`/`9ddb100d7e8e` already established, with the
+  matching Python-side `Enum` list update in `app/models/audit.py` — same "keep the Python list in
+  sync even though the real ALTER happens via raw SQL" pattern those two migrations' own notes
+  document) — FR-WBK-08 needed its own action value rather than overloading `"state_transition"`,
+  since a send and a reply-driven transition are two distinct events that can both happen against the
+  same commitment.
+- Full coverage per Prompt 12's own testing expectation: rate-ceiling enforcement including the real
+  concurrent-race case above, `send`-without-a-prior-`authorise` as an explicit negative test
+  (`tests/test_writeback_service.py::test_send_requires_prior_authorise`), reply-parses-to-transition
+  vs. reply-fails-and-escalates as two clearly separate cases plus a third for the
+  invalid-transition-implied variant (`tests/test_writeback_reply.py`), RLS and role-gating as two
+  independent properties (`tests/test_writeback_api.py`, same `..._are_isolated_via_project_join_rls`
+  / `test_read_only_member_can_...` shape `tests/test_risks_api.py` already established), and a full
+  draft -> authorise -> send -> history cycle exercised through the real ASGI app with the LLM call
+  monkeypatched at the same seam `app/writeback/compose.py` calls (`tests/test_ask_api.py`'s own
+  "fakes injected below the HTTP layer" idiom) — 464 passing at the end of this session (447 at the
+  start), zero mocks of the database/RLS/lock behaviour itself.
 
 ## Updating this file
 
