@@ -1233,6 +1233,17 @@ originally documented these as gaps
 for whichever frontend session reached them to close; those files have been updated to point at
 the real endpoints above instead.
 
+### `scripts/seed_dev_data.py` (added during frontend F0, 2026-08-09)
+
+Not a sixth item above — this is the one piece of backend work `Prompt F0 — Frontend Foundations.txt`
+itself always expected a frontend session to add (its own "WHAT TO BUILD" #1), not a gap this table's
+addendum found. Seeds one organisation, one `event-production-default`-archetype project, and one
+`User`+`Membership` per FR-ADM-01 role, for a human (or `frontend/e2e/global-setup.ts`) to paste into
+`/login`. Full story, including a real bug it surfaced in how `POST /auth/dev-login`'s
+subject-is-always-the-email minting interacts with `resolve_user`'s `(issuer, external_subject)`
+lookup, is in `frontend/PROGRESS.md`'s own F0 notes — not duplicated here since this table's own
+convention is one paragraph per row, not a running log of every script in the repo.
+
 ## Updating this file
 
 When a milestone completes:
