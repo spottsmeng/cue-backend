@@ -15,7 +15,7 @@ from app.capture.models import Message
 from app.capture.reconciliation import backfill_channel, detect_gap, run_gap_reconciliation_sweep
 from app.capture.schema import compute_payload_hash
 from app.models import Channel, Project
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class _NoCommitmentsClient:
@@ -25,8 +25,8 @@ class _NoCommitmentsClient:
     suite never depends on a live Ollama, whether or not one happens to be
     running on the machine executing it."""
 
-    async def complete(self, prompt: str, schema: dict) -> str:
-        return '{"commitments": []}'
+    async def complete(self, prompt: str, schema: dict):
+        return '{"commitments": []}', FAKE_LLM_USAGE
 
 
 async def _seed_message(app_session, project_id, channel_id, *, sent_at, external_id):

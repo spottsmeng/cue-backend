@@ -17,7 +17,7 @@ from app.capture.models import Message
 from app.capture.pipeline import ingest_channel_backlog, ingest_raw_message
 from app.capture.schema import RawCapturedMessage, compute_payload_hash
 from app.models import Channel, Commitment, Evidence, Project
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class ScriptedModelClient:
@@ -32,12 +32,12 @@ class ScriptedModelClient:
         self.default = default or {"commitments": []}
         self.calls = 0
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls += 1
         for substring, response in self.rules:
             if substring in prompt:
-                return json.dumps(response)
-        return json.dumps(self.default)
+                return json.dumps(response), FAKE_LLM_USAGE
+        return json.dumps(self.default), FAKE_LLM_USAGE
 
 
 def _commitment_response(evidence_span: str, deliverable_en: str) -> dict:

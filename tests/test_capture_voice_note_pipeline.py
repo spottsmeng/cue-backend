@@ -24,7 +24,7 @@ from app.capture.pipeline import ingest_raw_message
 from app.capture.schema import RawCapturedMedia, RawCapturedMessage, compute_payload_hash
 from app.documents.storage import get_storage_backend
 from app.models import Channel, Commitment, Evidence, Project
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 _SAY_AVAILABLE = shutil.which("say") is not None and shutil.which("afconvert") is not None
 
@@ -58,11 +58,11 @@ class ScriptedModelClient:
     def __init__(self, rules: list[tuple[str, dict]]):
         self.rules = rules
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         for substring, response in self.rules:
             if substring in prompt:
-                return json.dumps(response)
-        return json.dumps({"commitments": []})
+                return json.dumps(response), FAKE_LLM_USAGE
+        return json.dumps({"commitments": []}), FAKE_LLM_USAGE
 
 
 @pytest.mark.skipif(not _SAY_AVAILABLE, reason="macOS `say`/`afconvert` not available to synthesize test audio")

@@ -1,0 +1,23 @@
+# NFR-SEC-05: "continuous dependency scanning." No penetration test here —
+# that's the other, unrelated half of NFR-SEC-05 (needs an external firm,
+# not code; see backend/PROGRESS.md's M10 notes).
+#
+# `directory: "/"` on both entries, not "/backend" — this repo's root *is*
+# backend/ (its own git repo, its own GitHub remote), confirmed via `git
+# remote -v` before writing this file.
+version: 2
+updates:
+  # pyproject.toml / uv.lock — uv is a native Dependabot package ecosystem,
+  # not the generic "pip" one (which doesn't understand uv.lock).
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # .github/workflows/*.yml — currently pinned at inconsistent versions
+  # (pytest.yml: actions/checkout@v7, cue-eval.yml: @v4); Dependabot starts
+  # surfacing that drift going forward rather than it being fixed here.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

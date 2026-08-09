@@ -15,7 +15,7 @@ from sqlalchemy import select
 from app.documents.extractor import RejectedSpecClaim, extract_spec_claims
 from app.documents.models import Document, DocumentVersion, SpecClaim
 from app.models import Evidence
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 DOCUMENT_TEXT = "Location H: 2040mm x 1040mm graphic panel, Graphic print on plywood finish, qty 1 set."
 
@@ -28,9 +28,9 @@ class FakeModelClient:
         self.response = response
         self.calls: list[tuple[str, dict]] = []
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls.append((prompt, schema))
-        return json.dumps(self.response)
+        return json.dumps(self.response), FAKE_LLM_USAGE
 
 
 async def _make_document_version(app_session, project_id, text: str = DOCUMENT_TEXT) -> DocumentVersion:
@@ -75,7 +75,7 @@ async def test_evidence_span_not_in_document_text_is_rejected(app_session, org_a
 
     with pytest.raises(RejectedSpecClaim, match="evidence_span not found verbatim"):
         await extract_spec_claims(
-            app_session, project_id=project_id, document_version=version, client=fake,
+            app_session, project_id=project_id, organisation_id=org_id, document_version=version, client=fake,
         )
 
     await app_session.rollback()
@@ -105,7 +105,7 @@ async def test_valid_extraction_writes_spec_claim_and_evidence(
     )
 
     created = await extract_spec_claims(
-        app_session, project_id=project_id, document_version=version, client=fake,
+        app_session, project_id=project_id, organisation_id=org_id, document_version=version, client=fake,
     )
     await app_session.commit()
     assert len(created) == 1
@@ -154,7 +154,7 @@ async def test_multiple_claims_from_one_document_version(app_session, org_and_pr
     )
 
     created = await extract_spec_claims(
-        app_session, project_id=project_id, document_version=version, client=fake,
+        app_session, project_id=project_id, organisation_id=org_id, document_version=version, client=fake,
     )
     await app_session.commit()
 

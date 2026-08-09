@@ -103,7 +103,10 @@ async def draft_writeback(
     language = await resolve_channel_language(
         session, channel_id=channel.id, fallback=fallback_language
     )
-    draft_text = await compose_draft(commitment, language=language, client=client)
+    draft_text = await compose_draft(
+        commitment, language=language, client=client,
+        session=session, organisation_id=project.organisation_id,
+    )
 
     outbound = OutboundMessage(
         project_id=project.id,

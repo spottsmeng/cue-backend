@@ -26,7 +26,12 @@ from app.identity.models import MembershipRole
 # risk-triggered notification legitimately also names the commitment it
 # concerns).
 
-RiskSource = Enum("silence", "contradiction", "forecast", name="risk_source")
+# "model_drift" (M10, NFR-OBS-05/FR-VOI-06) added via a later migration
+# (see alembic/versions — the "M10 drift detection" revision) — a genuinely
+# new source, not a reuse of app/documents/drift.py's own, unrelated
+# "drift" concept (a circulated file differing from the project's approved
+# DocumentVersion by hash, which reuses source="contradiction").
+RiskSource = Enum("silence", "contradiction", "forecast", "model_drift", name="risk_source")
 RiskSeverity = Enum("low", "medium", "high", "critical", name="risk_severity")
 RiskStatus = Enum("open", "acknowledged", "resolved", "superseded", name="risk_status")
 

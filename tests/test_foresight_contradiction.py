@@ -17,7 +17,7 @@ from app.foresight.contradiction import scan_contradictions
 from app.foresight.deviation import get_deviation_class_term
 from app.foresight.models import Deviation, Risk
 from app.models import Evidence, Project
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class FakeContradictionClient:
@@ -25,9 +25,9 @@ class FakeContradictionClient:
         self.contradicts = contradicts
         self.calls = 0
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls += 1
-        return json.dumps({"contradicts": self.contradicts, "explanation": "test fixture"})
+        return json.dumps({"contradicts": self.contradicts, "explanation": "test fixture"}), FAKE_LLM_USAGE
 
 
 async def _make_claim(

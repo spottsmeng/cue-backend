@@ -14,6 +14,7 @@ from app.foresight.notification import dispatch_event
 from app.foresight.risk import create_or_supersede_risk
 from app.foresight.schema import CONTRADICTION_JUDGMENT_JSON_SCHEMA, ContradictionJudgment
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 from app.llm.factory import get_client
 from app.models import Project
 
@@ -62,7 +63,13 @@ def _rule_based_conflict(attribute: str, value_a: str, value_b: str) -> bool | N
 
 
 async def _llm_conflict(
-    attribute: str, value_a: str, value_b: str, client: ModelClient | None = None
+    attribute: str,
+    value_a: str,
+    value_b: str,
+    client: ModelClient | None = None,
+    *,
+    session: AsyncSession | None = None,
+    project: Project | None = None,
 ) -> bool:
     client = client or get_client("reasoning")
     prompt = (
@@ -74,7 +81,12 @@ async def _llm_conflict(
         "specifications for the same item — or are they compatible/consistent (e.g. one is more "
         "specific, or phrased differently but means the same thing)?"
     )
-    raw = await client.complete(prompt, CONTRADICTION_JUDGMENT_JSON_SCHEMA)
+    raw, usage = await client.complete(prompt, CONTRADICTION_JUDGMENT_JSON_SCHEMA)
+    if session is not None and project is not None:
+        await record_llm_usage(
+            session, organisation_id=project.organisation_id, project_id=project.id,
+            role="reasoning", purpose="contradiction_check", usage=usage,
+        )
     try:
         judgment = ContradictionJudgment.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError):
@@ -124,7 +136,10 @@ async def scan_contradictions(
 
             conflict = _rule_based_conflict(claim_a.attribute, claim_a.value, claim_b.value)
             if conflict is None:
-                conflict = await _llm_conflict(claim_a.attribute, claim_a.value, claim_b.value, client)
+                conflict = await _llm_conflict(
+                    claim_a.attribute, claim_a.value, claim_b.value, client,
+                    session=session, project=project,
+                )
             if not conflict:
                 continue
 

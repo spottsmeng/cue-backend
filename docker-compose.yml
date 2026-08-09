@@ -168,6 +168,60 @@ services:
       timeout: 3s
       retries: 30
 
+  # NFR-OBS-01/02/03 local verification target — behind `profiles:
+  # [observability]` so `docker compose up -d --wait` (pytest.yml's CI step,
+  # and everyone's default local `up`) never starts this: it's opt-in via
+  # `docker compose --profile observability up -d otel`, not a dependency
+  # of anything else in this file.
+  #
+  # CUE-Tech-Stack.md §2.6 names SigNoz as "the lighter one-system-instead-
+  # of-four option for a single-implementer setup" — real SigNoz is a
+  # multi-container stack (ClickHouse + its own OTel Collector + query
+  # service + frontend), heavier than what this session could stand up
+  # *and actually verify end-to-end* in one pass. `grafana/otel-lgtm` is
+  # the one this session actually ran (a single image bundling Grafana +
+  # Tempo (traces) + Prometheus (metrics) + an OTel Collector) — Grafana
+  # LGTM is CUE-Tech-Stack.md §2.6's other named option, chosen here
+  # specifically because "verify locally" mattered more this session than
+  # matching the tech-stack doc's own stated *default* preference. A real
+  # deployment should still default to SigNoz per that doc; this is a
+  # verification substitution, not a change to the named production
+  # choice — same "genuine FOSS substitute, explicitly not a claim of
+  # equivalence" posture the Mattermost/Nextcloud/GreenMail services above
+  # already establish for their own production counterparts.
+  otel:
+    image: grafana/otel-lgtm:latest
+    profiles: ["observability"]
+    ports:
+      - "3000:3000"   # Grafana UI (default admin/admin)
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP — app/observability/otel.py's OTLPSpanExporter/OTLPMetricExporter target this
+      - "3200:3200"   # Tempo query API (trace verification: curl .../api/search)
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # NFR-SEC-03 local verification target — docs/secrets-openbao-migration.md's
+  # KV layout/policy proven against a real (if dev-mode, in-memory,
+  # unsealed-on-boot) OpenBao instance. `profiles: [observability]`, same
+  # opt-in posture as `otel` above: `docker compose --profile observability
+  # up -d openbao`, never part of the default `up`/CI invocation. Dev mode
+  # only — root token fixed for local convenience, nothing here is a
+  # credential worth protecting.
+  openbao:
+    image: openbao/openbao:latest
+    profiles: ["observability"]
+    command: ["server", "-dev", "-dev-root-token-id=cue-dev-root"]
+    ports:
+      - "8200:8200"
+    healthcheck:
+      test: ["CMD-SHELL", "BAO_ADDR=http://localhost:8200 bao status"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
 volumes:
   cue_postgres_data:
   cue_minio_data:

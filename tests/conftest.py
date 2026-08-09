@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.identity.tokens import mint_local_token
+from app.llm.cost import LLMUsage
 from app.models import Base, Organisation, Party, Project
 from seed_data.channel_types import CHANNEL_TYPES
 from seed_data.deviation_classes import DEVIATION_CLASSES
@@ -34,6 +35,13 @@ ADMIN_URL = "postgresql+asyncpg://cue:cue@localhost:5432/cue"
 OWNER_TEST_URL = f"postgresql+asyncpg://cue:cue@localhost:5432/{TEST_DB_NAME}"
 
 EVENT_PRODUCTION_VERTICAL_CODE = next(code for code, _name in PLATFORM_VERTICALS if code == "event-production")
+
+# Every fake ModelClient across this suite returns this alongside its canned
+# text — ModelClient.complete's real contract is (text, LLMUsage) since M10's
+# cost-accounting change (app/llm/client.py); token counts are irrelevant to
+# what these fakes are testing, so one shared placeholder beats repeating
+# `LLMUsage(provider="fake", model="fake")` in every test file.
+FAKE_LLM_USAGE = LLMUsage(provider="fake", model="fake")
 
 # Tables never named directly in the per-test TRUNCATE. verticals genuinely
 # survives it (nothing being truncated is referenced *by* verticals in the
@@ -229,10 +237,29 @@ async def app_session():
     """The app's real session factory (app.core.db.async_session_factory),
     already pointed at cue_test/cue_app by pytest-env — not a parallel
     reimplementation. This is what RLS-sensitive tests use, since it's a
-    genuinely unprivileged connection, same as production."""
+    genuinely unprivileged connection, same as production.
+
+    Resets `app.current_org_id` to empty immediately on acquisition — found
+    during M10 (hardening): several call sites across this codebase
+    (app/foresight/worker.py's _set_org_context, scripts/extract_fixtures.py,
+    and now app/observability/drift.py's _notify_all_projects) deliberately
+    use `is_local=false` (SESSION-scoped, not transaction-scoped) when a
+    single session does several sequential commits for one org — correct
+    for that use case, but it means the value survives that session's own
+    close() and can still be sitting on the underlying pooled connection
+    when a *later, unrelated* test's `app_session` happens to draw the same
+    physical connection back out of the pool. Every test already calls
+    set_org_context() for whatever org it actually needs, so this reset
+    changes no test's behavior — it only removes a source of cross-test
+    flakiness that depends on pool checkout order (confirmed reproducible
+    on the pre-M10 codebase too, via an unrelated pair of existing test
+    files — this was latent before this session, not introduced by it)."""
+    from sqlalchemy import text as _text
+
     from app.core.db import async_session_factory
 
     async with async_session_factory() as session:
+        await session.execute(_text("SELECT set_config('app.current_org_id', '', false)"))
         yield session
 
 

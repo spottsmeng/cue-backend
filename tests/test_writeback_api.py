@@ -24,7 +24,7 @@ from app.identity.models import Membership, User
 from app.models import Channel, ChannelIdentity, Commitment, Evidence, OntologyTerm, Party, Project
 from app.writeback.models import OutboundMessage
 from main import app
-from tests.conftest import mint_token, set_org_context
+from tests.conftest import FAKE_LLM_USAGE, mint_token, set_org_context
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -93,8 +93,8 @@ class FakeJSONClient:
     def __init__(self, response: dict):
         self.response = response
 
-    async def complete(self, prompt: str, schema: dict) -> str:
-        return json.dumps(self.response)
+    async def complete(self, prompt: str, schema: dict):
+        return json.dumps(self.response), FAKE_LLM_USAGE
 
 
 @pytest.mark.asyncio

@@ -63,6 +63,37 @@ async def test_check_channel_health_records_healthy_event(app_session, org_and_p
 
 
 @pytest.mark.asyncio
+async def test_check_channel_health_emits_an_otel_gauge_per_check(app_session, org_and_project, monkeypatch):
+    """NFR-OBS-02 (M10): a metric on every check, not just healthy<->unhealthy
+    transitions (unlike the ERROR log below) — an uptime percentage needs
+    the full 1/0 series. The gauge is always a real (if no-op, since OTEL_*
+    is unset in the test env) instrument — get_meter()'s own no-op posture
+    means this doesn't need OTEL configured to assert against."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    channel = Channel(project_id=project_id, type="whatsapp", external_ref="g1", healthy=True)
+    app_session.add(channel)
+    await app_session.commit()
+
+    monkeypatch.setattr(
+        "app.capture.health.get_adapter",
+        lambda code: _FakeAdapter(ChannelHealthResult(healthy=False, detail={})),
+    )
+    recorded = []
+    monkeypatch.setattr(
+        "app.capture.health._health_gauge.set",
+        lambda value, attributes=None: recorded.append((value, attributes)),
+    )
+
+    await check_channel_health(app_session, channel=channel)
+    await app_session.commit()
+
+    assert recorded == [
+        (0, {"channel_id": str(channel.id), "channel_type": "whatsapp", "project_id": str(project_id)})
+    ]
+
+
+@pytest.mark.asyncio
 async def test_check_channel_health_marks_degraded_and_logs(
     app_session, org_and_project, monkeypatch
 ):

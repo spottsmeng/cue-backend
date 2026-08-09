@@ -21,15 +21,15 @@ from app.models import Channel, ChannelIdentity, Commitment, Evidence, OntologyT
 from app.writeback.models import OutboundMessage
 from app.writeback.rate_limit import RateCeilingExceeded
 from app.writeback.service import authorise_writeback, draft_writeback, send_writeback
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class FakeJSONClient:
     def __init__(self, response: dict):
         self.response = response
 
-    async def complete(self, prompt: str, schema: dict) -> str:
-        return json.dumps(self.response)
+    async def complete(self, prompt: str, schema: dict):
+        return json.dumps(self.response), FAKE_LLM_USAGE
 
 
 async def _act_term(app_session) -> OntologyTerm:

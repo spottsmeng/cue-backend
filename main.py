@@ -25,9 +25,11 @@ from app.api.risks import router as risks_router
 from app.api.twin import router as twin_router
 from app.api.webhooks import router as webhooks_router
 from app.api.writeback import router as writeback_router
-from app.core.db import get_session
+from app.core.db import engine, get_session
+from app.observability.otel import configure_otel
 
 app = FastAPI(title="CUE")
+configure_otel("cue-api", app=app, engine=engine)
 app.include_router(projects_router)
 app.include_router(commitments_router)
 app.include_router(milestones_router)

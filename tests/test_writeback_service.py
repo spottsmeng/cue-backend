@@ -25,7 +25,7 @@ from app.writeback.service import (
     draft_writeback,
     send_writeback,
 )
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class FakeJSONClient:
@@ -33,9 +33,9 @@ class FakeJSONClient:
         self.response = response
         self.calls = 0
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls += 1
-        return json.dumps(self.response)
+        return json.dumps(self.response), FAKE_LLM_USAGE
 
 
 async def _act_term(app_session, code: str) -> OntologyTerm:

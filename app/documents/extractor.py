@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.documents.models import DocumentVersion, SpecClaim
 from app.documents.schema import SpecClaimExtractionResult, load_spec_claim_json_schema
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 from app.llm.factory import get_client
 from app.models import Evidence
 
@@ -58,6 +59,7 @@ async def extract_spec_claims(
     session: AsyncSession,
     *,
     project_id: UUID,
+    organisation_id: UUID,
     document_version: DocumentVersion,
     client: ModelClient | None = None,
 ) -> list[SpecClaim]:
@@ -77,7 +79,11 @@ async def extract_spec_claims(
     schema = load_spec_claim_json_schema()
     client = client or get_client("extraction")
 
-    raw = await client.complete(prompt, schema)
+    raw, usage = await client.complete(prompt, schema)
+    await record_llm_usage(
+        session, organisation_id=organisation_id, project_id=project_id,
+        role="extraction", purpose="document_extraction", usage=usage,
+    )
     try:
         result = SpecClaimExtractionResult.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError) as e:

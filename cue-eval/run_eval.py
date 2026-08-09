@@ -8,6 +8,12 @@ CUE extraction eval — stdlib only, no pip install required.
   python3 run_eval.py --provider anthropic     # needs ANTHROPIC_API_KEY
   python3 run_eval.py --band multi             # only the multi-commitment cases
   python3 run_eval.py --show T07               # print raw output for one case
+  python3 run_eval.py --json                   # also print a JSON_SUMMARY: line
+                                                # (app/observability/drift.py's
+                                                # scheduled drift check parses
+                                                # this rather than the human
+                                                # table above — additive, the
+                                                # human output is unchanged)
 """
 
 import argparse, json, os, statistics, sys, time, urllib.error, urllib.request
@@ -172,6 +178,8 @@ def main():
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--band", default=None)
     ap.add_argument("--show", default=None)
+    ap.add_argument("--json", action="store_true",
+                     help="also print a JSON_SUMMARY: line for machine consumption")
     args = ap.parse_args()
 
     model = args.model or ("qwen2.5:14b" if args.provider == "ollama" else "claude-haiku-4-5")
@@ -190,6 +198,7 @@ def main():
     print("  " + "-" * 60)
 
     per_case, all_field_pcts, parse_fail = [], [], 0
+    case_spans_ok, case_count_ok = [], []  # one bool per case (majority-of-runs), for --json
 
     for case in cases:
         prompt = build_prompt(case)
@@ -226,6 +235,8 @@ def main():
         avg_pct = statistics.mean(run_pcts)
         all_field_pcts.append(avg_pct)
         per_case.append((case, avg_pct))
+        case_spans_ok.append(sum(run_spans) >= len(run_spans) / 2)
+        case_count_ok.append(sum(run_counts) >= len(run_counts) / 2)
 
         print("  {:<5} {:<15} {:>6} {:>7} {:>6.0f}% {:>7} {:>8.1f}".format(
             case["id"], case["band"],
@@ -253,6 +264,25 @@ def main():
         print("\n  below 70% — candidates for frontier-model routing:")
         print("    " + ", ".join(weak))
     print()
+
+    if args.json:
+        summary = {
+            "provider": args.provider,
+            "model": model,
+            "n_cases": len(cases),
+            "overall_field_accuracy": statistics.mean(all_field_pcts) if all_field_pcts else 0.0,
+            "by_band": {b: statistics.mean(pcts) for b, pcts in by_band.items()},
+            "spans_ok": sum(case_spans_ok),
+            "spans_total": len(case_spans_ok),
+            "count_ok": sum(case_count_ok),
+            "count_total": len(case_count_ok),
+            "parse_failures": parse_fail,
+            "weak_cases": weak,
+        }
+        # Unambiguous prefix, not "assume the last stdout line" — a
+        # subprocess caller (app/observability/drift.py) greps for this
+        # rather than parsing the human table above.
+        print("JSON_SUMMARY:" + json.dumps(summary))
 
 
 if __name__ == "__main__":

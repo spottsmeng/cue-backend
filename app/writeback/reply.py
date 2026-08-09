@@ -12,6 +12,7 @@ from app.foresight.notification import create_notification, default_recipients
 from app.ledger.audit import record_audit_event
 from app.ledger.lifecycle import InvalidTransition, validate_transition
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 from app.llm.factory import get_client
 from app.models import Commitment, Project
 from app.parties.service import recompute_vendor_metrics
@@ -65,7 +66,13 @@ async def _find_pending_outbound(
 
 
 async def _parse_reply(
-    outbound: OutboundMessage, message: Message, *, current_state: str, client: ModelClient
+    outbound: OutboundMessage,
+    message: Message,
+    *,
+    current_state: str,
+    client: ModelClient,
+    session: AsyncSession | None = None,
+    project: Project | None = None,
 ) -> ReplyParse:
     prompt = _PROMPT_TEMPLATE.format(
         language=outbound.language,
@@ -74,7 +81,12 @@ async def _parse_reply(
         current_state=current_state,
     )
     try:
-        raw = await client.complete(prompt, REPLY_PARSE_JSON_SCHEMA)
+        raw, usage = await client.complete(prompt, REPLY_PARSE_JSON_SCHEMA)
+        if session is not None and project is not None:
+            await record_llm_usage(
+                session, organisation_id=project.organisation_id, project_id=project.id,
+                role="reasoning", purpose="writeback_reply_parse", usage=usage,
+            )
         return ReplyParse.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError) as e:
         logger.info("reply parse failed schema validation for outbound %s: %s", outbound.id, e)
@@ -150,7 +162,10 @@ async def handle_potential_reply(
         return ReplyHandlingResult(matched_outbound=False)
 
     client = client or get_client("reasoning")
-    parsed = await _parse_reply(outbound, message, current_state=commitment.state, client=client)
+    parsed = await _parse_reply(
+        outbound, message, current_state=commitment.state, client=client,
+        session=session, project=project,
+    )
 
     if not parsed.parseable or not parsed.to_state:
         await _escalate(

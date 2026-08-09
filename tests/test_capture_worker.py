@@ -18,7 +18,7 @@ from sqlalchemy import select
 from app.capture.worker import enqueue_channel_ingestion, ingest_channel_job
 from app.foresight.config import get_arq_settings
 from app.models import Channel, Commitment
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class _NoCommitmentsClient:
@@ -29,8 +29,8 @@ class _NoCommitmentsClient:
     keyword-only test seam on ingest_channel_job specifically so this
     module's own tests don't have to reach for that live path at all."""
 
-    async def complete(self, prompt: str, schema: dict) -> str:
-        return '{"commitments": []}'
+    async def complete(self, prompt: str, schema: dict):
+        return '{"commitments": []}', FAKE_LLM_USAGE
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,7 @@ from app.ask.models import AskTurn
 from app.ask.retrieve import RetrievalHit
 from app.ledger.extractor import _get_commitment_act_term
 from app.models import AskConversation, Commitment, Evidence, Project
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class FakeEmbeddingClient:
@@ -47,11 +47,11 @@ class FakeReasoningClient:
         }
         self.calls: list[tuple[str, dict]] = []
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls.append((prompt, schema))
         if "is_action_request" in schema.get("properties", {}):
-            return json.dumps(self.intent_response)
-        return json.dumps(self.answer_response)
+            return json.dumps(self.intent_response), FAKE_LLM_USAGE
+        return json.dumps(self.answer_response), FAKE_LLM_USAGE
 
     @property
     def answer_calls(self) -> list[tuple[str, dict]]:

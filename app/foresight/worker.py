@@ -23,7 +23,7 @@ from app.capture.reconciliation import run_gap_reconciliation_sweep
 from app.capture.schedule import run_due_extraction_schedules
 from app.capture.worker import ingest_channel_job
 from app.core.config import get_settings
-from app.core.db import async_session_factory
+from app.core.db import async_session_factory, engine
 from app.foresight.config import get_arq_settings
 from app.foresight.contradiction import scan_contradictions
 from app.foresight.escalation import escalate_unacknowledged_risks
@@ -31,9 +31,18 @@ from app.foresight.forecast import scan_forecast, scan_overdue_commitments
 from app.foresight.notification import deliver_due_notifications
 from app.foresight.silence import scan_silence
 from app.models import Project
+from app.observability.drift import run_asr_drift_check, run_extraction_drift_check
+from app.observability.otel import configure_otel, traced_job
 from app.reports.schedule import run_due_report_schedules
 
 logger = logging.getLogger("app.foresight.worker")
+
+# No FastAPI `app` here — this is the arq worker process, a separate
+# `uv run arq ...` invocation from the API server main.py starts; each
+# process configures OTel for itself. `engine` passed so the SQLAlchemy
+# instrumentation covers this process's own DB writes too, not just the
+# API's.
+configure_otel("cue-arq-worker", engine=engine)
 
 
 async def _set_org_context(session: AsyncSession, org_id: uuid.UUID) -> None:
@@ -147,9 +156,26 @@ class WorkerSettings:
     module's usual "not tuned against any measured load" disclaimer.
     """
 
+    # M10 (NFR-OBS-01): every job body wrapped in one span
+    # (app/observability/otel.py's traced_job) — wrapped once here, not at
+    # each job's own definition, and the *same* wrapped object referenced
+    # in both functions/cron_jobs below (arq dispatches by function
+    # __name__, which functools.wraps preserves) so on-demand dispatch and
+    # the scheduled tick both go through the same traced entry point.
+    _traced_foresight_sweep = traced_job(run_foresight_sweep)
+    _traced_report_schedules = traced_job(run_due_report_schedules)
+    _traced_embedding_sweep = traced_job(run_embedding_sweep)
+    _traced_ingest_channel_job = traced_job(ingest_channel_job)
+    _traced_capture_health_sweep = traced_job(run_capture_health_sweep)
+    _traced_gap_reconciliation_sweep = traced_job(run_gap_reconciliation_sweep)
+    _traced_extraction_schedules = traced_job(run_due_extraction_schedules)
+    _traced_extraction_drift_check = traced_job(run_extraction_drift_check)
+    _traced_asr_drift_check = traced_job(run_asr_drift_check)
+
     functions = [
-        run_foresight_sweep, run_due_report_schedules, run_embedding_sweep, ingest_channel_job,
-        run_capture_health_sweep, run_gap_reconciliation_sweep, run_due_extraction_schedules,
+        _traced_foresight_sweep, _traced_report_schedules, _traced_embedding_sweep,
+        _traced_ingest_channel_job, _traced_capture_health_sweep, _traced_gap_reconciliation_sweep,
+        _traced_extraction_schedules, _traced_extraction_drift_check, _traced_asr_drift_check,
     ]
     # Every 15 minutes — frequent enough that a real silence/forecast/
     # escalation condition surfaces promptly, infrequent enough not to
@@ -162,21 +188,28 @@ class WorkerSettings:
     # run_capture_health_sweep's own 15-minute cadence is not this same
     # "arbitrary starting point" — it is FR-CAP-09's literal SLA number.
     cron_jobs = [
-        cron(run_foresight_sweep, minute=set(range(0, 60, 15))),
-        cron(run_due_report_schedules, minute=set(range(0, 60, 15))),
-        cron(run_embedding_sweep, minute=set(range(0, 60, 15))),
-        cron(run_capture_health_sweep, minute=set(range(0, 60, 15))),
+        cron(_traced_foresight_sweep, minute=set(range(0, 60, 15))),
+        cron(_traced_report_schedules, minute=set(range(0, 60, 15))),
+        cron(_traced_embedding_sweep, minute=set(range(0, 60, 15))),
+        cron(_traced_capture_health_sweep, minute=set(range(0, 60, 15))),
         # FR-CAP-10's own scheduled-window reader — same tick as every
         # other 15-minute sweep; a schedule's own interval_minutes (checked
         # by _is_due, app/capture/schedule.py) is what actually governs how
         # often a given channel's window fires, this is just how often the
         # check itself runs.
-        cron(run_due_extraction_schedules, minute=set(range(0, 60, 15))),
+        cron(_traced_extraction_schedules, minute=set(range(0, 60, 15))),
         # FR-CAP-08's own reconciliation job — deliberately less frequent
         # than the health check above: a triggered backfill calls a real
         # fetch_backlog() against live channel infrastructure, materially
         # heavier than a health ping, so this runs on the half-hour rather
         # than every 15 minutes.
-        cron(run_gap_reconciliation_sweep, minute={0, 30}),
+        cron(_traced_gap_reconciliation_sweep, minute={0, 30}),
+        # M10 (NFR-OBS-05/FR-VOI-06): extraction-accuracy drift daily —
+        # cheap while production config is still Ollama (the default), and
+        # "regular cadence" is Prompt 13's own phrasing, no exact number
+        # pinned, unlike ASR below. ASR drift monthly — Prompt 13's own
+        # explicit number for that capability specifically.
+        cron(_traced_extraction_drift_check, hour={3}, minute={0}),
+        cron(_traced_asr_drift_check, day={1}, hour={3}, minute={0}),
     ]
     redis_settings = RedisSettings(host=_arq_settings.redis_host, port=_arq_settings.redis_port)

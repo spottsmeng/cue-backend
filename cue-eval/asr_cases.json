@@ -1,0 +1,11 @@
+{
+  "_comment": "FR-VOI-06's held-out labelled set. Deliberately small and synthetic — macOS `say` synthesized speech, not real Pico vendor voice notes (none exist to draw from yet; the real corpus comes from discovery/production the same way cases.json's own extraction cases do, per CUE-PRD.md §8.2). Sentences drawn from this repo's own vendor-message vocabulary (LED screens, rigging, deliveries) so they're at least domain-realistic, not generic dictation-test sentences.",
+  "cases": [
+    {"id": "A01", "lang": "en", "text": "The LED screen installation will be delayed by 2 hours tomorrow morning."},
+    {"id": "A02", "lang": "en", "text": "We can confirm the rigging inspection for Friday at 9am."},
+    {"id": "A03", "lang": "en", "text": "The quote for the stage backdrop is $12,500."},
+    {"id": "A04", "lang": "zh", "text": "灯光设备将在明天下午送达现场"},
+    {"id": "A05", "lang": "zh", "text": "我们确认星期五安装舞台背景"},
+    {"id": "A06", "lang": "zh", "text": "报价共计一万五千元"}
+  ]
+}

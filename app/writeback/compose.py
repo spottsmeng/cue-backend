@@ -1,8 +1,11 @@
 import json
+import uuid
 
 from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 from app.llm.factory import get_client
 from app.models import Commitment
 from app.writeback.schema import COMPOSE_DRAFT_JSON_SCHEMA, ComposedDraft
@@ -47,13 +50,23 @@ class ComposeError(Exception):
 
 
 async def compose_draft(
-    commitment: Commitment, *, language: str, client: ModelClient | None = None
+    commitment: Commitment,
+    *,
+    language: str,
+    client: ModelClient | None = None,
+    session: AsyncSession | None = None,
+    organisation_id: uuid.UUID | None = None,
 ) -> str:
     client = client or get_client("reasoning")
     fields = _format_commitment(commitment)
     prompt = _PROMPT_TEMPLATE.format(language=language, **fields)
 
-    raw = await client.complete(prompt, COMPOSE_DRAFT_JSON_SCHEMA)
+    raw, usage = await client.complete(prompt, COMPOSE_DRAFT_JSON_SCHEMA)
+    if session is not None and organisation_id is not None:
+        await record_llm_usage(
+            session, organisation_id=organisation_id, project_id=commitment.project_id,
+            role="reasoning", purpose="writeback_compose", usage=usage,
+        )
     try:
         draft = ComposedDraft.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError) as e:

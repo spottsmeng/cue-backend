@@ -372,7 +372,10 @@ async def extract_version_spec_claims(
     document = await _get_document(session, project, document_id)
     version = await _get_version(session, document, version_id)
     try:
-        claims = await extract_spec_claims(session, project_id=project.id, document_version=version)
+        claims = await extract_spec_claims(
+            session, project_id=project.id, organisation_id=project.organisation_id,
+            document_version=version,
+        )
     except RejectedSpecClaim as e:
         await session.rollback()
         raise HTTPException(status_code=422, detail=str(e)) from e

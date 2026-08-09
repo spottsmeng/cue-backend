@@ -11,6 +11,9 @@ import json
 import pytest
 
 from app.ask.intent import classify_intent
+from app.llm.cost import LLMUsage
+
+_FAKE_USAGE = LLMUsage(provider="fake", model="fake")
 
 
 class FakeReasoningClient:
@@ -18,19 +21,19 @@ class FakeReasoningClient:
         self.response = response
         self.calls: list[tuple[str, dict]] = []
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls.append((prompt, schema))
-        return json.dumps(self.response)
+        return json.dumps(self.response), _FAKE_USAGE
 
 
 class RaisingReasoningClient:
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         raise ConnectionError("model service unreachable")
 
 
 class GarbageReasoningClient:
-    async def complete(self, prompt: str, schema: dict) -> str:
-        return "not valid json"
+    async def complete(self, prompt: str, schema: dict):
+        return "not valid json", _FAKE_USAGE
 
 
 @pytest.mark.asyncio

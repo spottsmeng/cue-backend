@@ -14,6 +14,7 @@ from app.ledger.schema import (
     load_extraction_prompt_template,
 )
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 from app.llm.factory import get_client
 from app.models import Commitment, Evidence, OntologyTerm, Party
 
@@ -115,7 +116,11 @@ async def extract_case(
     schema = load_extraction_json_schema()
     client = client or get_client("extraction")
 
-    raw = await client.complete(prompt, schema)
+    raw, usage = await client.complete(prompt, schema)
+    await record_llm_usage(
+        session, organisation_id=organisation_id, project_id=project_id,
+        role="extraction", purpose="ledger_extraction", usage=usage,
+    )
     try:
         result = ExtractionResult.model_validate(json.loads(raw))
     except (json.JSONDecodeError, ValidationError) as e:

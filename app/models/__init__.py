@@ -37,6 +37,7 @@ from app.reports.models import ReportScheduleConfig, ReportSnapshot
 from app.ask.models import AskConversation, AskTurn, RetrievalChunk
 from app.parties.models import VendorMetric
 from app.writeback.models import OutboundMessage, WritebackAuditLog
+from app.llm.models import LLMUsageEvent
 
 __all__ = [
     "Base",
@@ -88,4 +89,5 @@ __all__ = [
     "ChannelExtractionSchedule",
     "OutboundMessage",
     "WritebackAuditLog",
+    "LLMUsageEvent",
 ]

@@ -24,6 +24,7 @@ from app.ask.retrieve import RetrievalHit, hybrid_retrieve
 from app.ask.schema import AskAnswerOut, Citation
 from app.documents.models import SpecClaim
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 from app.models import Evidence, Project
 
 logger = logging.getLogger("app.ask.answer")
@@ -186,7 +187,10 @@ async def answer_query(
     # is simply never made for this request. See app/ask/intent.py's module
     # docstring for why this has to be a separate call, not an instruction
     # folded into the answer-generation prompt.
-    intent = await classify_intent(question, reasoning_client)
+    intent = await classify_intent(
+        question, reasoning_client,
+        session=session, organisation_id=project.organisation_id, project_id=project.id,
+    )
 
     if intent.is_action_request:
         result = AskAnswerOut(
@@ -216,7 +220,11 @@ async def answer_query(
             )
         else:
             prompt = _build_prompt(question, hits, prior_turns)
-            raw = await reasoning_client.complete(prompt, _ANSWER_SCHEMA)
+            raw, usage = await reasoning_client.complete(prompt, _ANSWER_SCHEMA)
+            await record_llm_usage(
+                session, organisation_id=project.organisation_id, project_id=project.id,
+                role="reasoning", purpose="ask_answer_generation", usage=usage,
+            )
             parsed = json.loads(raw)
             hit_by_id = {str(h.source_id): h for h in hits}
             valid_hits = [hit_by_id[i] for i in parsed.get("citation_source_ids", []) if i in hit_by_id]

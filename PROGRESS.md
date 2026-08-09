@@ -20,7 +20,7 @@ there yet.
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Done (2026-08-08) |
 | M8 | Real channel capture | `Prompt 11 — Real channel capture.txt`, `Prompt 11b — Real channel capture (continued).txt` | §15 Phase 1 | M2, M4 | **Done**, with the same per-adapter honesty this milestone has had since item 2: items 1, 3–12 all genuinely built and tested this session (see M8 notes below) — real for everything not credential-blocked (Mattermost/IMAP-SMTP/Nextcloud capture, identity resolution, party-org effective-dating, consent, capture health, gap reconciliation, scheduled windows, FR-DOC-09 drift) or dependency-blocked in this sandbox (PaddleOCR, FunASR SenseVoice — real FOSS substitutes run instead, see below); code-complete/credential-blocked for WhatsApp/WeChat/Graph, unchanged from item 2 |
 | M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Done (2026-08-09) |
-| M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Not started |
+| M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Done (2026-08-09) |
 
 ### M1 notes for later sessions
 
@@ -1045,6 +1045,133 @@ Prompt 12's own EXPLICITLY OUT OF SCOPE section.
   monkeypatched at the same seam `app/writeback/compose.py` calls (`tests/test_ask_api.py`'s own
   "fakes injected below the HTTP layer" idiom) — 464 passing at the end of this session (447 at the
   start), zero mocks of the database/RLS/lock behaviour itself.
+
+### M10 notes for later sessions
+
+Prompt 13's own premise for item 1 (CI runner-availability failure) was stale — live `gh api`/
+`gh run list` evidence showed Actions enabled and check-runs already producing on every push, with a
+full healthy history back to 2026-08-06. The real, current, reproducible failure was two root causes:
+`pytest.yml` never installed `tesseract-ocr`/`poppler-utils` on the runner (4 of 6 failures cascaded
+from that), and one consent test constructed `NextcloudAdapter()` from ambient env/`.env`, which CI
+never provides. Fixed both directly rather than chasing the stale "runner not acquired" framing;
+confirmed via a real pushed commit (`5957f56`) and `gh api .../check-runs` showing
+`conclusion: success` — not a local simulation.
+
+- **Cost accounting (NFR-OBS-03) is a lightweight internal table (`llm_usage_events`), a deliberate
+  substitute for Langfuse** — the tuned choice this session's budget stretched to, per the prompt's own
+  explicit permission when standing up Langfuse is too heavy. `ModelClient.complete` now returns
+  `tuple[str, LLMUsage]` instead of bare `str` (a real, once-only protocol change touching all 7
+  production call sites and every test's fake client — `OllamaClient`/`AnthropicClient` were
+  discarding real usage data already present in the raw API response, not a "no-op when
+  unconfigured" case). `app/llm/cost.py`'s `record_llm_usage` is best-effort inside a SAVEPOINT
+  (`session.begin_nested()`) — a recording failure rolls back only the usage row, never the caller's
+  own already-good work in the same transaction (covered directly by
+  `tests/test_llm_cost.py::test_record_llm_usage_failure_is_swallowed_and_does_not_poison_the_transaction`).
+  Swap-out to real Langfuse: replace that function's body with a `langfuse.generation(...)` call,
+  gated the same no-op-when-unconfigured way as `OTEL_EXPORTER_OTLP_ENDPOINT` below.
+- **Tracing/metrics (NFR-OBS-01/02) — `app/observability/otel.py`**, genuinely no-op (no SDK
+  provider installed, no instrumentation library patches anything — not even httpx globally) when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, confirmed by the full suite passing with it unset
+  throughout. Verified end-to-end against a real local collector (`docker compose --profile
+  observability up -d otel` — `grafana/otel-lgtm`, a single all-in-one image, not the multi-container
+  SigNoz stack CUE-Tech-Stack.md §2.6 names as the actual production default; chosen here specifically
+  because standing it up *and verifying it end-to-end* mattered more this session than matching that
+  doc's own preference — see `docker-compose.yml`'s own comment on the `otel` service for the
+  reasoning; a real deployment should still default to SigNoz): emitted a real span, queried Tempo's
+  API inside the container, found it. `app/capture/health.py`'s `check_channel_health` now emits a
+  gauge (`cue.capture.channel_health`) on *every* check, not just healthy→unhealthy transitions (the
+  ERROR log FR-CAP-09 already had since M8) — an uptime percentage needs the full 1/0 series.
+- **Drift detection (NFR-OBS-05 + FR-VOI-06) — `app/observability/drift.py`**, two arq cron jobs
+  (`run_extraction_drift_check` daily, `run_asr_drift_check` monthly per the prompt's own explicit
+  number for that capability) registered on the one existing worker process
+  (`app/foresight/worker.py`), not a second one. Both run the relevant `cue-eval/` harness as a
+  subprocess (`run_eval.py --json` / new `asr_eval.py --json`, a small additive `JSON_SUMMARY:` line
+  on the former) and, on regression, raise a Risk through a genuinely new `RiskSource` value,
+  `'model_drift'` (migration `0a76bb463d69`) — deliberately not reusing `app/documents/drift.py`'s
+  unrelated `source="contradiction"` "drift" (a circulated file differing from its approved
+  `DocumentVersion` by hash). A model-accuracy regression is platform-wide, but this codebase has no
+  platform-level Risk/Notification concept anywhere — every existing detector is project-scoped — so
+  `_notify_all_projects` raises/supersedes a Risk per active project rather than inventing a one-off
+  exception; `create_or_supersede_risk`'s own dedup means a sustained regression doesn't re-notify
+  every single tick.
+  - `run_extraction_drift_check` derives provider/model from `get_llm_settings()` at call time, not
+    hardcoded to Anthropic — today that's `ollama`/`qwen2.5:14b` (the default), so it runs at zero
+    Anthropic cost until production config actually switches at go-live, honoring this project's own
+    zero-Anthropic-spend-until-go-live posture, and starts covering the real production model
+    automatically the day that config flips.
+  - `run_asr_drift_check` needed a held-out labelled audio set that didn't exist — built a small one
+    (`cue-eval/asr_cases.json`, 6 domain-realistic sentences, macOS `say`-synthesized) and a sibling
+    harness (`cue-eval/asr_eval.py`) measuring `FasterWhisperClient` (the only real, installed
+    `ASRClient`) via edit-distance WER/CER. Explicitly a small synthetic corpus, not real Pico vendor
+    audio — same honesty posture as every other "genuine FOSS substitute, not a claim of equivalence"
+    decision this project has made before. First real run: English WER 6.7% (inside PRD §8.1's ≤8%
+    target); Chinese CER 45.4%, but a *named, understood* confound, not "Chinese ASR is broken" —
+    `FasterWhisperClient`'s `tiny` model outputs Traditional Chinese characters even for zh_CN speech,
+    so a per-character diff against the corpus's Simplified reference counts every script-variant
+    character as an error; a fair CER needs Simplified/Traditional normalization (e.g. OpenCC) before
+    comparing, deliberately not added for a 6-case harness. Flagged in `asr_eval.py`'s own output, not
+    silently absorbed into "Chinese ASR fails."
+- **Secrets (NFR-SEC-03) — `docs/secrets-openbao-migration.md`**, plus a real (if dev-mode) OpenBao
+  container behind the same `profiles: [observability]` opt-in as `otel`. Verified end-to-end this
+  session: wrote a secret to the documented KV path, applied the documented policy
+  (`docs/openbao/cue-backend-policy.hcl`), read it back inside the container. `.env.example` was
+  badly out of date (9 documented vars vs. ~50 actually in use) — refreshed to match the real surface,
+  categorized by whether OpenBao migration is actually warranted (real secret vs. connection config vs.
+  behavioural switch — most of `.env`'s vars are the latter two, and moving them into a vault would be
+  security theatre, not hardening).
+- **Load testing (NFR-PRF) — `backend/loadtest/`**, k6 (not locust — no new Python dependency, and
+  `thresholds` turns NFR-PRF-02 into a pass/fail assertion the run itself checks). `loadtest/seed.py`
+  provisions an org/project/parties directly via the ORM (no public org-creation REST endpoint exists
+  — a real deployment provisions tenants out of band). Ran for real against a live `uvicorn` process:
+  100% checks passed, p95 create/verify/transition all under 25ms at 3 VUs/10s against fixture-scale
+  data. Per the prompt's own explicit instruction: this validates NFR-PRF-02 (Twin recomputation
+  ≤10s, since `/transitions` does that recompute synchronously in-request) and "the pipeline doesn't
+  fall over" — it does **not** validate NFR-PRF-01 (capture-to-ledger latency), which needs real
+  message volume M8's credential-blocked channels can't yet supply. `loadtest/README.md` says this
+  explicitly; don't let a future session cite this harness as NFR-PRF-01 proof.
+- **Dependabot (NFR-SEC-05)** — `.github/dependabot.yml`, `uv` + `github-actions` ecosystems, weekly.
+  The other half of NFR-SEC-05 (an annual penetration test) needs an external firm, not code —
+  unchanged, out of scope here as the prompt itself names.
+- **A real, pre-existing test-suite flake found and fixed along the way, not introduced by this
+  session**: `tests/conftest.py`'s `app_session` fixture now resets `app.current_org_id` on
+  acquisition. Root cause, confirmed two ways — (1) reproduced on the pre-M10 codebase via `git
+  stash`, using a file pair with zero relation to this session's own work
+  (`test_writeback_rate_limit.py` + `test_audit_log.py`, order-dependent, not present in the natural
+  alphabetical full-suite run); (2) bisected this session's own new drift tests down to the exact
+  mechanism (a test leaving its own `app_session` transaction open while a job function under test
+  opens additional `async_session_factory()` sessions internally — `run_capture_health_sweep`'s own
+  existing tests happen to commit `app_session` before calling the sweep, which is what avoided this
+  all along, not robustness). The suite was never actually protected against this by design — only by
+  alphabetical ordering luck, which any new test file (this session's, or a future one) can perturb.
+  The fixture-level reset fixes the general class; `tests/test_observability_drift.py`'s own tests
+  additionally follow the same "commit before calling into a job that opens its own sessions" pattern
+  `test_capture_health.py` already established, now made explicit rather than accidental.
+- Full coverage: `uv run pytest` green (480 passing, up from 464 at the start of this session — 16 new
+  tests: cost accounting, both drift jobs' regression/no-regression/infra-failure/dedup paths, OTel
+  no-op posture, the capture-health gauge), confirmed deterministic across repeated runs, before and
+  after every instrumentation change — proving the no-op posture holds, not just asserting it does.
+
+**Overall CUE-PRD.md backend implementation state, end of M10 (the last milestone in this plan):**
+M1–M10 all Done. Every PRD capability area (§4 Ledger, §5 Twin, §6 Foresight/Documents/Ask/Reports/
+Write-back/Governance, §7 NFRs to the extent this backend-only, no-live-deployment session could
+reach them) has real, tested code behind it — no capability is a stub or a fabricated-looking demo
+path. What remains genuinely open, by design, not oversight:
+- **Credential-blocked, code-complete**: WhatsApp, WeChat Work, Graph (`teams`/`outlook`) — real Pico
+  infrastructure access was never available in this environment; live testing against it is the
+  natural first task once it is.
+- **Dependency-blocked, real FOSS substitutes running instead**: PaddleOCR (Tesseract runs), FunASR
+  SenseVoice (FasterWhisper runs, with the Chinese-transcription caveat this session's own ASR drift
+  check just measured and named).
+- **Structurally deferred, named with their own reasons in the milestone notes above**: FR-LED-05
+  (supersession linking — `compute_revision_churn`/`compute_price_drift` report `value=None` until it
+  lands), FR-TWN-08 (learned duration distributions), FR-FOR-05 (photo verification), full
+  push/email/Teams `Notification` delivery (webhook is the only real adapter), FR-ASK-06's
+  conversational-action execution.
+- **Deployment/infrastructure, not backend code** — named explicitly rather than silently skipped,
+  per this milestone's own EXPLICITLY OUT OF SCOPE section: multi-region data planes, confirmed
+  production volume + headroom (SCL-01, blocked on a real number from Pico, §16 open question 1),
+  independent horizontal scaling, 99.5%/99.9% measured availability, RPO/RTO, TLS/AES-256/per-tenant
+  keys, signed media URLs, capture-agent credential isolation, and an actual penetration test.
 
 ## Updating this file
 

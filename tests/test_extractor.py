@@ -20,7 +20,7 @@ from app.ledger.extractor import (
 )
 from app.models import Commitment, Evidence
 from sqlalchemy import select
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 CONTEXT = {
     "project": "Test Project",
@@ -58,9 +58,9 @@ class FakeModelClient:
         self.response = response
         self.calls: list[tuple[str, dict]] = []
 
-    async def complete(self, prompt: str, schema: dict) -> str:
+    async def complete(self, prompt: str, schema: dict):
         self.calls.append((prompt, schema))
-        return json.dumps(self.response)
+        return json.dumps(self.response), FAKE_LLM_USAGE
 
 
 @pytest.mark.asyncio

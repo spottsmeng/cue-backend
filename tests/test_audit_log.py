@@ -16,7 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from app.ledger.audit import record_audit_event
 from app.ledger.extractor import _get_commitment_act_term
 from app.models import AuditLog, Commitment, Evidence
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 async def _make_commitment(app_session, project_id, vendor, internal) -> Commitment:
@@ -191,19 +191,22 @@ async def test_extraction_writes_an_audit_entry(app_session, org_and_project):
     }
 
     class FakeModelClient:
-        async def complete(self, prompt: str, schema: dict) -> str:
-            return json.dumps(
-                {
-                    "commitments": [
-                        {
-                            "act_type": "confirm",
-                            "deliverable_en": "screen install",
-                            "deliverable_original": "screen install",
-                            "evidence_span": "screen install will be delayed 2 hrs",
-                            "confidence": 0.85,
-                        }
-                    ]
-                }
+        async def complete(self, prompt: str, schema: dict):
+            return (
+                json.dumps(
+                    {
+                        "commitments": [
+                            {
+                                "act_type": "confirm",
+                                "deliverable_en": "screen install",
+                                "deliverable_original": "screen install",
+                                "evidence_span": "screen install will be delayed 2 hrs",
+                                "confidence": 0.85,
+                            }
+                        ]
+                    }
+                ),
+                FAKE_LLM_USAGE,
             )
 
     created = await extract_case(

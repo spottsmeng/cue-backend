@@ -17,10 +17,13 @@ execution path in which it could, not a prompt asking it not to.
 
 import json
 import logging
+import uuid
 
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.llm.client import ModelClient
+from app.llm.cost import record_llm_usage
 
 logger = logging.getLogger("app.ask.intent")
 
@@ -55,7 +58,14 @@ class IntentClassification(BaseModel):
     action_summary: str | None = None
 
 
-async def classify_intent(question: str, reasoning_client: ModelClient) -> IntentClassification:
+async def classify_intent(
+    question: str,
+    reasoning_client: ModelClient,
+    *,
+    session: AsyncSession | None = None,
+    organisation_id: uuid.UUID | None = None,
+    project_id: uuid.UUID | None = None,
+) -> IntentClassification:
     """Fails open (treated as "not an action request") if the reasoning
     model itself can't be reached — same NFR-AVL-03 "degrade gracefully"
     posture app/ask/answer.py's own _embed_question already applies to the
@@ -65,10 +75,19 @@ async def classify_intent(question: str, reasoning_client: ModelClient) -> Inten
     mode — it just declines to *additionally* enforce the FR-ASK-06 guard on
     a request that was already going to fail downstream for the same
     infrastructure reason.
+
+    `session`/`organisation_id`/`project_id` are optional (default None,
+    which skips usage recording) so this stays callable the way existing
+    tests already call it — with just a question and a fake client.
     """
     prompt = _PROMPT_TEMPLATE.format(question=question)
     try:
-        raw = await reasoning_client.complete(prompt, _INTENT_SCHEMA)
+        raw, usage = await reasoning_client.complete(prompt, _INTENT_SCHEMA)
+        if session is not None and organisation_id is not None:
+            await record_llm_usage(
+                session, organisation_id=organisation_id, project_id=project_id,
+                role="reasoning", purpose="ask_intent_classification", usage=usage,
+            )
         parsed = json.loads(raw)
         return IntentClassification(**parsed)
     except Exception:  # noqa: BLE001 — any failure of an external model call

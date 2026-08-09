@@ -12,12 +12,12 @@ from sqlalchemy import select
 from app.capture.models import ChannelExtractionSchedule, Message
 from app.capture.schedule import _is_due, run_due_extraction_schedules
 from app.models import Channel
-from tests.conftest import set_org_context
+from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
 class _NoCommitmentsClient:
-    async def complete(self, prompt: str, schema: dict) -> str:
-        return '{"commitments": []}'
+    async def complete(self, prompt: str, schema: dict):
+        return '{"commitments": []}', FAKE_LLM_USAGE
 
 
 def _config(interval_minutes=30, last_run_at=None, active=True):

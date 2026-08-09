@@ -32,8 +32,22 @@ from app.capture.schema import ChannelHealthResult
 from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.models import Channel
+from app.observability.otel import get_meter
 
 logger = logging.getLogger("cue.capture.health")
+
+# NFR-OBS-02: "per-channel capture-health metrics with alerting" — the
+# alerting *action* (the ERROR log below) has existed since M8; this gauge
+# is what M10 adds, so uptime is visible on the same dashboard as
+# everything else, not just a one-off log line when something breaks.
+# Emitted on *every* check, not only transitions (unlike the log below) —
+# an uptime percentage needs the full 1/0 series, not just edges.
+# get_meter() is always safe to call (app/observability/otel.py's no-op
+# posture) — a real gauge when OTEL_EXPORTER_OTLP_ENDPOINT is configured,
+# a harmless no-op otherwise.
+_health_gauge = get_meter("cue.capture.health").create_gauge(
+    "cue.capture.channel_health", description="1 = healthy, 0 = unhealthy, per channel per check"
+)
 
 
 async def _call_adapter_health(adapter: ChannelAdapter, channel: Channel) -> ChannelHealthResult:
@@ -68,6 +82,13 @@ async def check_channel_health(session: AsyncSession, *, channel: Channel) -> Ch
     )
     session.add(event)
     await session.flush()
+
+    _health_gauge.set(
+        1 if result.healthy else 0,
+        attributes={
+            "channel_id": str(channel.id), "channel_type": channel.type, "project_id": str(channel.project_id),
+        },
+    )
 
     if was_healthy and not result.healthy:
         # FR-CAP-09: "surface degraded channels to Administrators within 15
