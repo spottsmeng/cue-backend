@@ -40,9 +40,21 @@ from app.core.db import async_session_factory
 from app.foresight.deviation import draft_deviation
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
-from app.models import Budget, Channel, ChannelIdentity, Commitment, Evidence, OntologyTerm, Organisation, Party, Project
+from app.models import (
+    Budget,
+    Channel,
+    ChannelIdentity,
+    Commitment,
+    Evidence,
+    Milestone,
+    OntologyTerm,
+    Organisation,
+    Party,
+    Project,
+)
 from app.models.vertical import Vertical
-from app.twin.service import materialize_archetype
+from app.twin.models import Dependency
+from app.twin.service import get_milestone_type_term, materialize_archetype
 
 # FR-ADM-01's full role enum (app/identity/models.py's MembershipRole) — one
 # user per role, so every later milestone's prompt can log in as whichever
@@ -81,6 +93,8 @@ async def main() -> None:
         session.add(Organisation(id=org_id, name="CUE Dev Org"))
         await session.flush()
 
+        now = datetime.now(dt_timezone.utc)
+
         project = Project(
             id=project_id,
             organisation_id=org_id,
@@ -89,6 +103,17 @@ async def main() -> None:
             client_name="Dev Client",
             venue="Dev Venue",
             timezone="Asia/Singapore",
+            # F2 enablement: materialize_archetype below only stamps a real
+            # `planned_at` on every seeded Milestone when event_start is set
+            # (its own docstring: "If project.event_start isn't set yet,
+            # milestones are still created... with planned_at=None"). Without
+            # this, every node's earliest/latest/slack in TwinCurrentOut
+            # would be None and the Twin surface would have nothing to
+            # render — this was a real gap this session found and closed
+            # (event_start was never set here before F2), not a pre-existing
+            # deliberate choice. ~90 days out covers the archetype's own
+            # earliest anchor (fnb_confirmation, day_offset -86).
+            event_start=now + timedelta(days=90),
         )
         session.add(project)
         await session.flush()
@@ -98,7 +123,53 @@ async def main() -> None:
         # "event-production-default" (seed_data/event_production_archetype.py's
         # ARCHETYPE_CODE) is the actual archetype row's code; "event-production"
         # alone is the *vertical* code and 422s here as an unknown archetype.
-        await materialize_archetype(session, project, "event-production-default")
+        archetype_milestones = await materialize_archetype(session, project, "event-production-default")
+
+        # F2 enablement: the archetype itself is honestly a linear chain
+        # (seed_data/event_production_archetype.py's own docstring: "Annex A
+        # gives us an ordered schedule, not a branching dependency graph").
+        # F2's own TESTING EXPECTATION asks for "a couple of parallel
+        # branches, at least one fixed node" to make critical-path/slack
+        # rendering meaningfully testable — `doors` already covers the fixed
+        # node, so this adds one real fork/join around the existing
+        # load-in -> rigging -> install -> exhibitor-check-in run: a second,
+        # slower path (a generator delivery, 5 days versus the existing
+        # path's 1) that becomes the actual critical path, pushing rigging/
+        # install/exhibitor-check-in onto real, non-zero slack. Added here
+        # (a project-level Dependency, per app/twin/models.py's Dependency
+        # docstring) rather than edited into the shared archetype template
+        # itself — this is one dev project's own fixture, not a change to
+        # what every future project seeds from.
+        milestones_by_name = {m.name: m for m in archetype_milestones}
+        load_in = milestones_by_name["Exhibits move in"]
+        content_load = milestones_by_name["Content load into screens"]
+        generator_type_term = await get_milestone_type_term(session, project, "rigging")
+        generator_delivery = Milestone(
+            project_id=project.id,
+            type_term_id=generator_type_term.id,
+            name="Backup generator delivery",
+            planned_at=load_in.planned_at + timedelta(days=5) if load_in.planned_at else None,
+            is_fixed=False,
+        )
+        session.add(generator_delivery)
+        await session.flush()
+        session.add_all(
+            [
+                Dependency(
+                    project_id=project.id,
+                    upstream_milestone_id=load_in.id,
+                    downstream_milestone_id=generator_delivery.id,
+                    lag_days=5,
+                ),
+                Dependency(
+                    project_id=project.id,
+                    upstream_milestone_id=generator_delivery.id,
+                    downstream_milestone_id=content_load.id,
+                    lag_days=0,
+                ),
+            ]
+        )
+        await session.flush()
 
         # `POST /auth/dev-login` always mints `subject=body.email` (app/api/
         # auth.py) — never a value this script chooses — and resolve_user
@@ -171,7 +242,8 @@ async def main() -> None:
             )
         ).scalar_one()
 
-        now = datetime.now(dt_timezone.utc)
+        # `now` was already computed above, right after the org context was
+        # set — reused here rather than a second call, same value either way.
 
         # Commitment 1: pending_verification, monetary, real-capture evidence
         # — the export-block / verify-end-to-end / write-back-draft case.
