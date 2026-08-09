@@ -19,9 +19,11 @@
           "evidence_span": { "type": "string" },
           "confidence": { "type": "number" }
         },
-        "required": ["act_type", "deliverable_en", "deliverable_original", "evidence_span", "confidence"]
+        "required": ["act_type", "deliverable_en", "deliverable_original", "evidence_span", "confidence"],
+        "additionalProperties": false
       }
     }
   },
-  "required": ["commitments"]
+  "required": ["commitments"],
+  "additionalProperties": false
 }

@@ -181,6 +181,86 @@
         ]
       },
       "note": "后天 = day after tomorrow. Tests relative-date arithmetic in Chinese."
+    },
+    {
+      "id": "S01",
+      "band": "singlish",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Ah Seng Production",
+      "sent_at": "2026-06-20T10:15:00+08:00",
+      "message": "Ah Seng here — can deliver the LED screen tomorrow morning lah, no problem one.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "commit", "due_at": "2026-06-21", "deliverable_contains": "screen" }
+        ]
+      },
+      "note": "Sentence-final particles 'lah' and 'one' (emphasis/affirmation) around a plain forward commitment, date-only relative resolution."
+    },
+    {
+      "id": "S02",
+      "band": "singlish",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Vertex Fabrication",
+      "sent_at": "2026-06-20T14:00:00+08:00",
+      "message": "The truss frame done already lor, can collect anytime after 3pm today.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "confirm", "due_at": "2026-06-20T15:00:00+08:00", "deliverable_contains": "truss" }
+        ]
+      },
+      "note": "'Already' as a completion marker (not a time word) plus sentence-final 'lor' — tests that the model reports this as confirm (already done), not commit, and doesn't misread 'already' as part of a date."
+    },
+    {
+      "id": "S03",
+      "band": "singlish",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Kim Seng Logistics",
+      "sent_at": "2026-06-21T11:20:00+08:00",
+      "message": "Eh can you chase the venue for our loading bay access or not? We stuck outside since 10am.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "query" }
+        ]
+      },
+      "note": "The 'X or not?' question pattern — tests it's read as a query asking the recipient to act, not a commitment, and that no due_at is fabricated from '10am' (that's describing the current problem, not a deadline)."
+    },
+    {
+      "id": "S04",
+      "band": "singlish",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Golden Palate",
+      "sent_at": "2026-06-19T16:45:00+08:00",
+      "message": "Wah the seafood cost went up already sia, now $18 per pax instead of $15.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "renegotiate", "amount": 18, "currency": "SGD", "price_changed": true, "deliverable_contains": "seafood" }
+        ]
+      },
+      "note": "Exclamatory 'wah' + sentence-final 'sia' around a price renegotiation — tests the interjection/particle doesn't get mistaken for content, and the new (not old) amount is extracted."
+    },
+    {
+      "id": "S05",
+      "band": "singlish",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Bloomworks",
+      "sent_at": "2026-06-18T09:00:00+08:00",
+      "message": "Bloomworks here — flowers for the main stage confirm already, we deliver 23 Jun morning can.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "commit", "due_at": "2026-06-23", "deliverable_contains": "flower" }
+        ]
+      },
+      "note": "Bare-verb future tense ('we deliver' meaning 'we will deliver') plus sentence-final 'can' as an affirmation particle, around an explicit calendar date rather than a relative one."
     }
   ]
 }
