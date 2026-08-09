@@ -1244,6 +1244,60 @@ subject-is-always-the-email minting interacts with `resolve_user`'s `(issuer, ex
 lookup, is in `frontend/PROGRESS.md`'s own F0 notes — not duplicated here since this table's own
 convention is one paragraph per row, not a running log of every script in the repo.
 
+### Frontend-enablement additions, round 2 (during frontend F1, 2026-08-09)
+
+Same pattern as the five post-M10 additions above — gaps `Prompt F1 — Living WIP, Verification
+and Write-back.txt` found while reading the surfaces it builds against, closed on the spot:
+
+- **`EvidenceOut.media_ref`** (`app/api/schemas.py`) — `Evidence.media_ref` (a signed, expiring
+  URI) has been populated since M8's capture pipeline set it on voice-note evidence
+  (`app/capture/pipeline.py`), but no response schema ever exposed it, so FR-VOI-05 ("retain
+  original audio and make it playable from any evidence link") had no API surface at all — F1's
+  own evidence viewer (original text + translation toggle + audio playback) had nothing to play.
+  Additive field, `str | None`, no migration needed.
+- **`GET /projects/{project_id}/members/me`** (`app/api/projects.py`, `EffectiveRoleOut` in
+  `app/api/schemas.py`) — F1's payment-status/budget-revise controls are Finance/Producer-only,
+  and `app/api/deps.py`'s `require_project_role` docstring names "which actions to *show* as
+  available" as a legitimate client-side judgment call (a UX nicety, never a security boundary —
+  every mutating endpoint still independently re-derives and enforces its own role gate). Nothing
+  before this let a non-admin caller learn their own effective role set on a project at all; this
+  wraps `app.identity.service.effective_roles` (already used by `require_project_role` itself)
+  behind the same any-membership read-access tier every other project-scoped GET uses. Not a
+  security-relevant endpoint on its own — it returns exactly what the caller already implicitly
+  proved by authenticating, nothing about any other user. `tests/test_frontend_enablement_f1.py`,
+  5 new tests (2 for `media_ref`, 3 for `/members/me` including the non-member-404 case).
+
+- **`PATCH /projects/{project_id}/writeback/{outbound_id}`** (`WritebackDraftUpdate` in
+  `app/writeback/schema.py`, `edit_writeback_draft` in `app/writeback/service.py`) — F1's own "WHAT
+  TO BUILD" #4 names "shows the composed question for human review/**edit** before authorisation";
+  review already had a surface (`GET`), edit didn't — draft/authorise/send had no fourth call for
+  it. `draft_text`-only, `WRITE_ROLES`-gated same as draft/authorise/send, and only while `status ==
+  "draft"` (409 otherwise, mirroring `authorise_writeback`'s own guard) — once authorised, the text
+  a human signed off on is frozen, same reasoning `OutboundMessage`'s docstring gives for freezing
+  `to_external_id`/`language`/`channel_id` at draft time. Not logged to `WritebackAuditLog` (would
+  need a new native-enum value on `WritebackAuditAction`, i.e. a migration, for what this module's
+  own docstring already treats as a non-event — "only a real `send` is logged... per Prompt 12 item
+  6"); the row's own `updated_at` is the edit trail. `tests/test_writeback_api.py`'s new
+  `test_edit_draft_before_authorise_then_locked_after`.
+
+`uv run pytest` green afterward: 504 passing (up from 498).
+
+**`scripts/seed_dev_data.py` extended** (same file F0 added, not a new script): F1's own TESTING
+EXPECTATION explicitly prefers extending this seed over hand-crafting one-off fixtures for "a
+commitment already sitting in `pending_verification` to test against." Added: a vendor + internal
+`Party`, a `whatsapp` `Channel` + `ChannelIdentity` (write-back's `_resolve_writeback_target` needs
+real-capture evidence — a manually-entered commitment can never be drafted against, per
+`WritebackTargetUnresolved`'s own docstring), a `Message` + real-capture `Evidence` (bilingual:
+Chinese original, English translation, exercising P7's toggle), one `pending_verification` monetary
+`Commitment` off that evidence (exercises verify-end-to-end, the export-block 409, and write-back
+draft in one fixture), one `human_verified` `Commitment` for section variety, a `Budget` baseline
+(so the budget summary and the export gate are both resolvable rather than "no baseline"), and one
+`auto_drafted` `Deviation` off the pending commitment (via `app/foresight/deviation.py`'s own
+`draft_deviation`, not hand-built) for the risk-and-issues section and F1's deviation-confirm
+action. Verified against the live API post-seed: `GET .../report/current` renders all of the above,
+`POST .../report/export` 409s with the expected `blocking_commitments` entry, `GET
+.../members/me` returns the right role per seeded user.
+
 ## Updating this file
 
 When a milestone completes:

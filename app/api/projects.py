@@ -10,6 +10,7 @@ from app.api.deps import get_current_user, get_project, require_project_role
 from app.api.schemas import (
     DelegationCreate,
     DelegationOut,
+    EffectiveRoleOut,
     MembershipCreate,
     MembershipOut,
     ProjectArchiveOut,
@@ -155,6 +156,26 @@ async def list_projects(
 @router.get("/{project_id}", response_model=ProjectOut)
 async def read_project(project: Annotated[Project, Depends(get_project)]) -> Project:
     return project
+
+
+@router.get("/{project_id}/members/me", response_model=EffectiveRoleOut)
+async def read_my_effective_roles(
+    project: Annotated[Project, Depends(get_project)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> EffectiveRoleOut:
+    """Frontend-enablement addition (same "close the gap you find, document
+    it" pattern as the five post-M10 additions this table's own PROGRESS.md
+    section already lists) — F1's verification/payment-status/budget UI
+    needs to know which controls to *show* the current user
+    (`require_project_role`'s own "UX nicety, not a security boundary"
+    position); nothing before this endpoint let a non-admin caller learn
+    their own role on a project at all. Any project member (not just
+    ADMIN_ROLES) may call this — `Depends(get_project)` already requires
+    *some* membership or active delegation, same read-access tier every
+    other project-scoped GET in this router uses."""
+    roles = await effective_roles(session, user.id, project.id)
+    return EffectiveRoleOut(roles=sorted(roles))
 
 
 @router.post("/{project_id}/archive", response_model=ProjectArchiveOut)

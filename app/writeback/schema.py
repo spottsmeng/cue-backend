@@ -80,6 +80,19 @@ class WritebackDraftRequest(BaseModel):
     commitment_id: uuid.UUID
 
 
+class WritebackDraftUpdate(BaseModel):
+    """FR-WBK-05 made real in the UI, not just the backend (Prompt F1's own
+    instruction): "shows the composed question for human review/edit before
+    authorisation" — review already had a surface (GET), edit didn't.
+    `draft_text` is the only editable field, and only while `status ==
+    "draft"` (service.py's edit_writeback_draft enforces this) — once
+    authorised, the text a human signed off on must never move again, same
+    reasoning OutboundMessage's own docstring gives for freezing
+    to_external_id/language/channel_id at draft time."""
+
+    draft_text: str
+
+
 class OutboundMessageOut(BaseModel):
     id: uuid.UUID
     project_id: uuid.UUID

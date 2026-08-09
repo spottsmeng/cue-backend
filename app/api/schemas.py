@@ -72,6 +72,18 @@ class MembershipOut(BaseModel):
     granted_by: uuid.UUID | None
 
 
+class EffectiveRoleOut(BaseModel):
+    """Backs `GET /projects/{project_id}/members/me` — the frontend's own
+    "which actions to *show* as available" judgment call
+    (`app/api/deps.py`'s `require_project_role` docstring: "a UX nicety, not
+    a security boundary"). `roles` is `app.identity.service.effective_roles`
+    verbatim (own membership role plus any currently-active delegated
+    role) — never itself checked by any mutating endpoint, every one of
+    which independently re-derives and enforces this same set server-side."""
+
+    roles: list[MembershipRoleLiteral]
+
+
 class DelegationCreate(BaseModel):
     """FR-ADM-03: time-boxed delegation. `expires_at` is required — there is
     no un-time-boxed delegation, by design (PRD: 'time-boxed delegation for
@@ -155,6 +167,13 @@ class EvidenceOut(BaseModel):
     translation: str | None
     span_start: int | None
     span_end: int | None
+    # FR-VOI-05: "retain original audio and make it playable from any
+    # evidence link" — the model column (app/models/ledger.py) has carried
+    # this since M8's capture pipeline set it (app/capture/pipeline.py), but
+    # no response schema ever exposed it, so no API caller could ever play
+    # a voice note back. A signed, expiring URI per that column's own
+    # comment, or None when this evidence has no attached audio.
+    media_ref: str | None
 
 
 class CommitmentOut(BaseModel):

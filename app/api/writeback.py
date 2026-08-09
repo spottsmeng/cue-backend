@@ -19,12 +19,14 @@ from app.writeback.schema import (
     WritebackConfigOut,
     WritebackConfigUpdate,
     WritebackDraftRequest,
+    WritebackDraftUpdate,
 )
 from app.writeback.service import (
     InvalidWritebackTransition,
     WritebackTargetUnresolved,
     authorise_writeback,
     draft_writeback,
+    edit_writeback_draft,
     send_writeback,
 )
 
@@ -148,6 +150,25 @@ async def create_writeback_draft(
         raise HTTPException(status_code=422, detail=str(e)) from e
     except ComposeError as e:
         raise HTTPException(status_code=502, detail=f"draft composition failed: {e}") from e
+    await session.commit()
+    return outbound
+
+
+@router.patch("/{outbound_id}", response_model=OutboundMessageOut)
+async def edit_writeback_draft_endpoint(
+    outbound_id: uuid.UUID,
+    body: WritebackDraftUpdate,
+    project: Annotated[Project, Depends(_require_write)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> OutboundMessage:
+    """FR-WBK-05's "review/edit before authorisation", made real in the UI
+    (Prompt F1's own instruction) — the edit half; draft/authorise/send
+    cover compose/approve/deliver."""
+    outbound = await _get_outbound(session, project, outbound_id)
+    try:
+        outbound = await edit_writeback_draft(session, outbound=outbound, draft_text=body.draft_text)
+    except InvalidWritebackTransition as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     await session.commit()
     return outbound
 

@@ -208,3 +208,49 @@ async def test_full_draft_authorise_send_cycle_through_http(app_session, authed_
     assert history.status_code == 200
     assert len(history.json()) == 1
     assert history.json()[0]["status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_edit_draft_before_authorise_then_locked_after(app_session, authed_org_and_project):
+    """F1 frontend-enablement addition: PATCH .../{outbound_id} — FR-WBK-05's
+    "review/edit before authorisation" made real, the edit half (review
+    already had a surface via GET). Editable only while status == "draft";
+    once authorised, the text a human signed off on is frozen, same
+    reasoning the class docstring gives for to_external_id/language/
+    channel_id."""
+    org_id, project_id, _admin, token = authed_org_and_project
+    commitment = await _seed_draftable_commitment(app_session, org_id, project_id)
+
+    transport = ASGITransport(app=app)
+    with patch(
+        "app.writeback.compose.get_client",
+        return_value=FakeJSONClient({"question": "Still on track?"}),
+    ):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            draft_response = await client.post(
+                f"/projects/{project_id}/writeback/draft",
+                headers=_headers(token),
+                json={"commitment_id": str(commitment.id)},
+            )
+    outbound_id = draft_response.json()["id"]
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        edited = await client.patch(
+            f"/projects/{project_id}/writeback/{outbound_id}",
+            headers=_headers(token),
+            json={"draft_text": "Confirming: install still happening Friday, yes/no?"},
+        )
+        assert edited.status_code == 200
+        assert edited.json()["draft_text"] == "Confirming: install still happening Friday, yes/no?"
+
+        authorise_response = await client.post(
+            f"/projects/{project_id}/writeback/{outbound_id}/authorise", headers=_headers(token)
+        )
+        assert authorise_response.status_code == 200
+
+        locked = await client.patch(
+            f"/projects/{project_id}/writeback/{outbound_id}",
+            headers=_headers(token),
+            json={"draft_text": "too late"},
+        )
+    assert locked.status_code == 409

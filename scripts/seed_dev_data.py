@@ -28,16 +28,19 @@ hard on CUE_AUTH_PROVIDER=local and 404s otherwise).
 import asyncio
 import sys
 import uuid
+from datetime import datetime, timedelta, timezone as dt_timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import select, text
 
+from app.capture.models import Message
 from app.core.db import async_session_factory
+from app.foresight.deviation import draft_deviation
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
-from app.models import Organisation, Project
+from app.models import Budget, Channel, ChannelIdentity, Commitment, Evidence, OntologyTerm, Organisation, Party, Project
 from app.models.vertical import Vertical
 from app.twin.service import materialize_archetype
 
@@ -112,6 +115,7 @@ async def main() -> None:
         # right above them.
         org_suffix = org_id.hex[:8]
         seeded: list[tuple[str, str]] = []
+        users_by_role: dict[str, User] = {}
         for role in ROLES:
             email = f"{role}+{org_suffix}@cue.dev"
             user = User(
@@ -127,6 +131,136 @@ async def main() -> None:
                 Membership(user_id=user.id, project_id=project_id, role=role, granted_by=user.id)
             )
             seeded.append((role, email))
+            users_by_role[role] = user
+
+        # --- F1 enablement: Living WIP needs real ledger content to render,
+        # not an empty-project shell — a pending-verification, monetary,
+        # real-capture-backed commitment is what F1's own TESTING
+        # EXPECTATION names ("a commitment already sitting in
+        # pending_verification to test against... prefer extending the seed
+        # over hand-crafting one-off fixtures"). This also gives write-back
+        # something real to draft against (FR-WBK-01 needs a captured
+        # message's channel/party, not a manually-entered commitment — see
+        # app/writeback/service.py's _resolve_writeback_target) and the
+        # budget/export-block flow something to actually block on.
+        vendor = Party(organisation_id=org_id, display_name="Golden Sound & Light Pte Ltd", type="vendor_org")
+        internal = Party(organisation_id=org_id, display_name="Pico Production Team", type="internal_staff")
+        session.add_all([vendor, internal])
+        await session.flush()
+
+        channel = Channel(project_id=project_id, type="whatsapp", external_ref=f"dev-seed-vendor-group-{org_suffix}")
+        session.add(channel)
+        await session.flush()
+        # `channel_identities` has a UNIQUE(channel_type, external_id) that is
+        # global, not per-organisation (app/models/party.py) — a fixed phone
+        # number here collides across separate seed runs the same way a fixed
+        # user email would, so it gets the same org_suffix treatment.
+        vendor_phone = f"+65-6555-{org_suffix[:4]}"
+        session.add(
+            ChannelIdentity(party_id=vendor.id, channel_type="whatsapp", external_id=vendor_phone)
+        )
+
+        act_term = (
+            await session.execute(
+                select(OntologyTerm).where(
+                    OntologyTerm.category == "commitment_act",
+                    OntologyTerm.code == "commit",
+                    OntologyTerm.vertical_id.is_(None),
+                    OntologyTerm.organisation_id.is_(None),
+                )
+            )
+        ).scalar_one()
+
+        now = datetime.now(dt_timezone.utc)
+
+        # Commitment 1: pending_verification, monetary, real-capture evidence
+        # — the export-block / verify-end-to-end / write-back-draft case.
+        pending_commitment = Commitment(
+            project_id=project_id, party_id=vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="committed",
+            deliverable_en="LED wall rental — main stage",
+            deliverable_original="LED屏幕租赁 —主舞台",
+            due_at=now + timedelta(days=10), amount=18500.00, currency="SGD",
+            confidence=0.91, field_confidence={"amount": 0.91, "due_at": 0.88},
+            verification_state="pending_verification",
+        )
+        session.add(pending_commitment)
+        await session.flush()
+
+        pending_message_text = (
+            "确认了,主舞台LED屏幕租赁总共18500新元,含运输安装,十天后到场"
+        )
+        pending_message = Message(
+            project_id=project_id, channel_id=channel.id,
+            external_id=f"dev-seed-msg-{uuid.uuid4()}",
+            sender_external_id=vendor_phone, author_party_id=vendor.id,
+            sent_at=now, language="zh-Hans", text=pending_message_text,
+            payload_hash=f"dev-seed-hash-{uuid.uuid4()}",
+        )
+        session.add(pending_message)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=pending_commitment.id, message_id=pending_message.id,
+                channel="whatsapp", sent_at=now, language="zh-Hans",
+                original_text=pending_message_text,
+                translation=(
+                    "Confirmed — LED wall rental for the main stage, total SGD 18,500 including "
+                    "delivery and installation, arriving in ten days."
+                ),
+                span_start=0, span_end=len(pending_message_text),
+            )
+        )
+
+        # Commitment 2: already human_verified and on-plan, so vendor status/
+        # next-steps sections show more than one row.
+        verified_commitment = Commitment(
+            project_id=project_id, party_id=vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="committed",
+            deliverable_en="Stage rigging safety certification",
+            deliverable_original="Stage rigging safety certification",
+            due_at=now + timedelta(days=3), confidence=0.97, field_confidence={},
+            verification_state="human_verified",
+            verified_by=users_by_role["project_manager"].id, verified_at=now,
+        )
+        session.add(verified_commitment)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=verified_commitment.id, channel="manual", sent_at=now,
+                language="en",
+                original_text="Rigging safety cert confirmed on site walkthrough, 3 days out.",
+            )
+        )
+
+        # Budget baseline — makes the budget-summary section (and the
+        # export-block gate, since pending_commitment's amount feeds
+        # outstanding_payments) actually resolvable rather than "no budget
+        # baseline recorded".
+        budget = Budget(
+            project_id=project_id, approved_amount=250_000.00, currency="SGD",
+            approved_by=users_by_role["producer"].id, approved_at=now,
+            revision_of=None, is_current=True,
+        )
+        session.add(budget)
+        await session.flush()
+        session.add(
+            Evidence(
+                budget_id=budget.id, channel="manual", sent_at=now, language="en",
+                original_text="Budget baseline recorded via scripts/seed_dev_data.py (FR-ADM-11).",
+            )
+        )
+        await session.flush()
+
+        # Auto-drafted deviation off the pending commitment, so the
+        # risk-and-issues section and the F1 deviation-confirm action both
+        # have a real row to act on.
+        await draft_deviation(
+            session, project=project, class_code="spec_drift",
+            description_en="Vendor's quoted LED wall spec drifted from the approved render — confirm before sign-off.",
+            commitment_id=pending_commitment.id,
+            evidence_text="Auto-drafted from a forecast/spec-drift check (scripts/seed_dev_data.py fixture).",
+        )
 
         await session.commit()
 

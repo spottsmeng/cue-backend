@@ -123,6 +123,28 @@ async def draft_writeback(
     return outbound
 
 
+async def edit_writeback_draft(
+    session: AsyncSession, *, outbound: OutboundMessage, draft_text: str
+) -> OutboundMessage:
+    """FR-WBK-05's "review/edit before authorisation" — edit half of that,
+    added alongside draft/authorise/send rather than folded into any of
+    them, same one-call-one-purpose shape the three-tap precedent already
+    established. Only a `draft` row is editable; once authorised, the text a
+    human signed off on is frozen (InvalidWritebackTransition otherwise, the
+    same guard authorise_writeback uses). No audit event here — only a real
+    `send` is logged to the shared trail (this module's own docstring,
+    Prompt 12 item 6); an edit is fully visible via this row's own
+    `updated_at` and never itself the decision being audited."""
+    if outbound.status != "draft":
+        raise InvalidWritebackTransition(
+            f"cannot edit an OutboundMessage in status {outbound.status!r} — only a draft"
+        )
+    outbound.draft_text = draft_text
+    await session.flush()
+    await session.refresh(outbound, attribute_names=["updated_at"])
+    return outbound
+
+
 async def authorise_writeback(
     session: AsyncSession, *, outbound: OutboundMessage, actor_id: uuid.UUID
 ) -> OutboundMessage:
