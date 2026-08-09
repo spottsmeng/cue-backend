@@ -1173,6 +1173,66 @@ path. What remains genuinely open, by design, not oversight:
   independent horizontal scaling, 99.5%/99.9% measured availability, RPO/RTO, TLS/AES-256/per-tenant
   keys, signed media URLs, capture-agent credential isolation, and an actual penetration test.
 
+### Frontend-enablement additions (post-M10, 2026-08-09)
+
+Not a new milestone — M1–M10 above is still the complete PRD build plan, and this table's own
+row structure isn't extended for it. These are five small, scoped backend additions made while
+starting `frontend/PROGRESS.md`'s own plan (a parallel, frontend-only milestone table — see that
+file), each one a gap the frontend audit found and closed on the spot rather than leaving as a
+surprise for whichever `Prompt FN` session hit it first, per this project's own established
+"close the gap you find, document it" pattern (the same posture Documents' Prompt 6 session used
+for its early SharePoint write-back, or M8's `channel_types` reference-table pivot).
+
+- **`POST /auth/dev-login`** (`app/api/auth.py`) — there was no way to authenticate an HTTP
+  request against this API at all before this addition; `mint_local_token`
+  (`app/identity/tokens.py`) existed only as a function `tests/conftest.py` called directly. This
+  endpoint is that same function, reachable over HTTP, gated hard on
+  `CUE_AUTH_PROVIDER=local` (404s otherwise) — it mints a token for any `organisation_id`/`email`
+  a caller names, no credential check of any kind, so the guard is the only thing standing between
+  this and a real tenant-isolation failure if it were ever reachable against `oidc`. See that
+  file's own module docstring for the full reasoning. `tests/test_auth_dev_login.py`.
+- **CORS** (`app/core/config.py`'s new `cors_origins`/`cors_origins_list`, wired in `main.py`) —
+  no `CORSMiddleware` existed anywhere in this codebase; a browser on `localhost:3000` could not
+  call this API from any origin regardless of auth correctness. `CUE_CORS_ORIGINS` (comma-
+  separated, default `http://localhost:3000`), `.env.example` updated.
+- **`GET /projects/{id}/ontology-terms?category=X`** (`app/api/ontology.py`, backed by a new
+  public `list_ontology_terms` in `app/twin/service.py` that wraps the existing private
+  `_resolve_ontology_terms` — the same three-tier resolution `get_milestone_type_term` already
+  exposed for the single-code case, now exposed for "give me the whole set") — every `*_code`
+  field across this API (`MilestoneCreate.type_code`, `CommitmentCreate.act_type`,
+  `DeviationCreate.class_code`, `DocumentCreate`/`DocumentTagRequest`'s `class_code`/`phase_code`)
+  assumed the caller already knew the valid codes; there was no discovery endpoint for any of
+  them. Plain project-membership-gated (same tier as `GET .../milestones`), since this is
+  reference data any project member needs to build a form, not an admin action.
+  `tests/test_ontology_terms_api.py`, including a real tenant-extension-shadows-platform-term
+  case.
+- **`GET /parties`** (`app/api/parties.py`'s new `list_router`) — `/parties/{id}/reliability`
+  needs a `party_id` the caller already knows; there was no route in this codebase that could tell
+  a caller which `party_id`s exist at all. Same `require_org_finance` gate and same explicit
+  `organisation_id` filter (`parties` still has no RLS policy of its own — a pre-existing gap,
+  unchanged by this addition) as the reliability endpoints it sits beside. Filterable by
+  `type`/`city`/`vendor_category` (the last one a direct join on `Party.vendor_category_term_id`,
+  not a three-tier resolution — a party's own category was already resolved to one specific row at
+  assignment time). `tests/test_parties_list_api.py`, including cross-organisation isolation as
+  its own explicit property.
+- **`GET /admin/cost-summary`** (`app/api/admin.py`) — `llm_usage_events` (NFR-OBS-03, built in
+  M10 as the deliberate Langfuse substitute) has been written to by every extraction/ask/
+  contradiction/write-back call since the Hardening session, but nothing ever read it back over
+  the API — PRD §13's own "cost per active project" row had no real surface. `require_org_
+  administrator`-gated; aggregates by `(project_id, provider, model)`; relies on
+  `llm_usage_events`' own `tenant_isolation` RLS policy rather than an explicit filter, since that
+  table (unlike `parties`) does have one. `estimated_cost_usd=None` on a row/total means genuinely
+  unknown (an unrecognised model), never confused with a real `$0.00` (which is what a self-hosted
+  Ollama call honestly reports) — see `CostSummaryRow`'s own docstring in `app/api/schemas.py`.
+  `tests/test_admin_api.py`.
+
+All five are real, tested additions, not stubs — `uv run pytest` green afterward: 498 passing (up
+from 480 at the end of M10 — 18 new tests: 4 for `/auth/dev-login`, 5 for `/ontology-terms`, 5 for
+`GET /parties`, 4 for `/admin/cost-summary`). `frontend/PROGRESS.md`'s `Prompt F0`/`F2`/`F6`/`F8`
+originally documented these as gaps
+for whichever frontend session reached them to close; those files have been updated to point at
+the real endpoints above instead.
+
 ## Updating this file
 
 When a milestone completes:

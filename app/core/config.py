@@ -27,6 +27,21 @@ class Settings(BaseSettings):
     migration_database_url: str = "postgresql+asyncpg://cue:cue@localhost:5432/cue"
     sql_echo: bool = False
 
+    # CORS — comma-separated origins allowed to call this API from a browser
+    # (the Next.js frontend, per frontend/PROGRESS.md's F0 milestone). No
+    # CORSMiddleware existed at all before that milestone; a same-origin-
+    # policy-respecting browser could not call this API from any origin,
+    # regardless of how correct the bearer-token auth was. Default is the
+    # frontend's own local dev port only — widen per-environment via
+    # CUE_CORS_ORIGINS, never with a wildcard while allow_credentials=True
+    # (browsers reject that combination outright, and it would defeat the
+    # point of an allowlist).
+    cors_origins: str = "http://localhost:3000"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
     # extra="ignore": .env is shared with docker-compose (CUE_APP_DB_PASSWORD)
     # and db/init/01-create-app-role.sql's shell environment, not just this
     # class — it should pick out its own fields, not reject unknown ones.

@@ -832,3 +832,80 @@ class QuietHoursConfigWrite(BaseModel):
     quiet_start_local: time
     quiet_end_local: time
     critical_severity_threshold: RiskSeverityLiteral = "critical"
+
+
+# --- Ontology term discovery (app/api/ontology.py) ------------------------
+
+
+class OntologyTermOut(BaseModel):
+    """GET /projects/{id}/ontology-terms?category=X — read-only discovery
+    of the valid *_code values for one ontology_terms category, resolved
+    against the calling project's own effective three-tier vocabulary
+    (CUE-PRD.md §4.2.1). `id` is deliberately omitted: every *_code field
+    across this API (MilestoneCreate.type_code, CommitmentCreate.act_type,
+    DeviationCreate.class_code, ...) takes the stable `code`, never the
+    internal surrogate id — this response shape matches what a caller can
+    actually use."""
+
+    code: str
+    label_en: str
+    label_zh: str
+    sort_order: int
+
+
+# --- Party directory (app/api/parties.py) ---------------------------------
+
+PartyTypeLiteral = Literal["person", "vendor_org", "internal_staff"]
+
+
+class PartyOut(BaseModel):
+    """GET /parties — org-wide vendor/contact directory. Party is org-
+    scoped, not project-scoped (app/models/party.py's own docstring: "the
+    same vendor contact is one row across every project they appear in"),
+    same reasoning /parties/{id}/reliability already reads on."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organisation_id: uuid.UUID
+    display_name: str
+    type: PartyTypeLiteral
+    vendor_category_term_id: uuid.UUID | None
+    city: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- Cost accounting (app/api/admin.py, NFR-OBS-03) ------------------------
+
+
+class CostSummaryRow(BaseModel):
+    """One (project, provider, model) bucket from llm_usage_events
+    (app/llm/cost.py). `estimated_cost_usd=None` on a row means a genuinely
+    unrecognised model, not "free" — a self-hosted Ollama model reports a
+    real 0.0 (app/llm/cost.py's own _PRICING_PER_1M_TOKENS comment), never
+    None, so a caller can trust that distinction rather than treating every
+    falsy cost the same way."""
+
+    project_id: uuid.UUID | None
+    provider: str
+    model: str
+    call_count: int
+    tokens_in: int
+    tokens_out: int
+    estimated_cost_usd: float | None
+
+
+class CostSummaryOut(BaseModel):
+    """PRD §13's "cost per active project" row, made real for the first
+    time — llm_usage_events has been written since the Hardening session
+    (backend/PROGRESS.md's M10) but nothing ever read it back until this
+    endpoint. `total_estimated_cost_usd=None` means literally no row in
+    this result carried a known cost (e.g. every call so far was an
+    unrecognised model), distinct from a real $0.00 across only-Ollama
+    usage — same "don't fabricate what you don't have" discipline
+    CostSummaryRow's own docstring applies at the row level."""
+
+    rows: list[CostSummaryRow]
+    total_calls: int
+    total_estimated_cost_usd: float | None

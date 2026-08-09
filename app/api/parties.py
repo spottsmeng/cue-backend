@@ -6,10 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_org_administrator, require_org_finance
-from app.api.schemas import PartyOrganisationMappingOut, PartyOrganisationMappingSet
+from app.api.schemas import PartyOrganisationMappingOut, PartyOrganisationMappingSet, PartyOut, PartyTypeLiteral
 from app.core.db import get_session
 from app.identity.models import User
-from app.models import Party
+from app.models import OntologyTerm, Party
 from app.parties.organisation_mapping import (
     OrganisationMappingError,
     get_current_organisation,
@@ -119,6 +119,45 @@ async def read_vendor_reliability_history(
         metric=metric,
         history=[_metric_out(s) for s in snapshots],
     )
+
+
+# GET /parties — the vendor/contact directory the reliability endpoint
+# above never had: /parties/{id}/reliability needs a party_id the caller
+# already knows, and until this router existed there was no route in this
+# codebase that could tell a caller which party_ids exist at all. Same
+# require_org_finance gate as reliability (Procurement-tier, org-wide, not
+# project-scoped — Party has no project_id of its own, per its own
+# docstring); same explicit organisation_id filter as _get_party above,
+# for the same reason (`parties` has no RLS policy of its own).
+list_router = APIRouter(prefix="/parties", tags=["parties"])
+
+
+@list_router.get("", response_model=list[PartyOut])
+async def list_parties(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_org_finance)],
+    type: PartyTypeLiteral | None = None,
+    city: str | None = None,
+    vendor_category: str | None = None,
+) -> list[Party]:
+    """`vendor_category` filters by ontology_terms.code via a direct join on
+    Party.vendor_category_term_id — a party's own category was already
+    resolved to one specific tier's row at assignment time (FR-VRG-02), so
+    matching that row's code directly is unambiguous; this does not need
+    the three-tier *resolution* app/twin/service.py's list_ontology_terms
+    performs when validating a caller-supplied code, only a lookup against
+    a code a caller is filtering by."""
+    stmt = select(Party).where(Party.organisation_id == user.organisation_id)
+    if type is not None:
+        stmt = stmt.where(Party.type == type)
+    if city is not None:
+        stmt = stmt.where(Party.city == city)
+    if vendor_category is not None:
+        stmt = stmt.join(OntologyTerm, Party.vendor_category_term_id == OntologyTerm.id).where(
+            OntologyTerm.code == vendor_category
+        )
+    stmt = stmt.order_by(Party.display_name)
+    return list((await session.execute(stmt)).scalars().all())
 
 
 # FR-NRM-04: a person's effective-dated vendor-company mapping — a

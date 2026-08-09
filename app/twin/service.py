@@ -155,6 +155,26 @@ async def get_milestone_type_term(session: AsyncSession, project: Project, code:
     return term
 
 
+async def list_ontology_terms(
+    session: AsyncSession, project: Project, category: str
+) -> list[OntologyTerm]:
+    """Public, category-general form of _resolve_ontology_terms above —
+    added for GET /projects/{id}/ontology-terms (app/api/ontology.py), the
+    frontend's own discovery endpoint for every *_code field across
+    Milestone/Commitment/Deviation/Document creation (type_code, act_type,
+    class_code, ...). Reuses the exact same three-tier resolution
+    get_milestone_type_term already wraps for the single-code case, rather
+    than a second, independently-maintained copy of that SQL living in
+    app/api/ontology.py — this module is already the established
+    cross-domain import point for ontology resolution (app/documents/
+    service.py imports get_milestone_type_term from here for the same
+    reason). Sorted by sort_order then label_en for a stable, display-ready
+    order; an unknown/never-seeded category simply returns an empty list,
+    not an error — there is nothing category-specific to validate here."""
+    by_code = await _resolve_ontology_terms(session, category, project)
+    return sorted(by_code.values(), key=lambda term: (term.sort_order, term.label_en))
+
+
 async def _resolve_archetype(
     session: AsyncSession, project: Project, archetype_code: str | None
 ) -> MilestoneArchetype | None:

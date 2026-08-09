@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
+from app.llm.models import LLMUsageEvent
 from app.models import Organisation, Project
 from main import app
 from tests.conftest import mint_token, set_org_context
@@ -253,3 +254,116 @@ async def test_export_nonexistent_project_404s(authed_org_and_project):
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.get(f"/admin/export/{uuid.uuid4()}", headers=_headers(admin_token))
     assert response.status_code == 404
+
+
+# --- GET /admin/cost-summary (NFR-OBS-03 / PRD §13) ------------------------
+
+
+async def _log_usage(app_session, org_id, project_id, *, provider, model, tokens_in, tokens_out, cost):
+    await set_org_context(app_session, org_id)
+    app_session.add(
+        LLMUsageEvent(
+            organisation_id=org_id, project_id=project_id, role="extraction", purpose="test",
+            provider=provider, model=model, tokens_in=tokens_in, tokens_out=tokens_out,
+            estimated_cost_usd=cost,
+        )
+    )
+    await app_session.commit()
+
+
+@pytest.mark.asyncio
+async def test_cost_summary_aggregates_by_project_provider_and_model(
+    app_session, authed_org_and_project
+):
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+    await _log_usage(
+        app_session, org_id, project_id,
+        provider="ollama", model="qwen2.5:14b", tokens_in=100, tokens_out=50, cost=0.0,
+    )
+    await _log_usage(
+        app_session, org_id, project_id,
+        provider="ollama", model="qwen2.5:14b", tokens_in=200, tokens_out=80, cost=0.0,
+    )
+    await _log_usage(
+        app_session, org_id, project_id,
+        provider="anthropic", model="claude-haiku-4-5", tokens_in=1000, tokens_out=200, cost=0.002,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/admin/cost-summary", headers=_headers(admin_token))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total_calls"] == 3
+    assert body["total_estimated_cost_usd"] == pytest.approx(0.002)
+
+    rows = {(r["provider"], r["model"]): r for r in body["rows"]}
+    ollama_row = rows[("ollama", "qwen2.5:14b")]
+    assert ollama_row["call_count"] == 2
+    assert ollama_row["tokens_in"] == 300
+    assert ollama_row["tokens_out"] == 130
+    assert ollama_row["estimated_cost_usd"] == pytest.approx(0.0)
+
+    anthropic_row = rows[("anthropic", "claude-haiku-4-5")]
+    assert anthropic_row["call_count"] == 1
+    assert anthropic_row["estimated_cost_usd"] == pytest.approx(0.002)
+
+
+@pytest.mark.asyncio
+async def test_cost_summary_filters_by_project(app_session, authed_org_and_project):
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+    other_project_id = uuid.uuid4()
+    await set_org_context(app_session, org_id)
+    existing_project = await app_session.get(Project, project_id)
+    app_session.add(
+        Project(
+            id=other_project_id, organisation_id=org_id, vertical_id=existing_project.vertical_id,
+            name="Other Project", timezone="Asia/Singapore",
+        )
+    )
+    await app_session.commit()
+    await _log_usage(
+        app_session, org_id, project_id, provider="ollama", model="qwen2.5:14b",
+        tokens_in=10, tokens_out=5, cost=0.0,
+    )
+    await _log_usage(
+        app_session, org_id, other_project_id, provider="ollama", model="qwen2.5:14b",
+        tokens_in=999, tokens_out=999, cost=0.0,
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            "/admin/cost-summary", params={"project_id": str(project_id)}, headers=_headers(admin_token)
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["total_calls"] == 1
+    assert body["rows"][0]["tokens_in"] == 10
+
+
+@pytest.mark.asyncio
+async def test_cost_summary_with_no_usage_reports_none_not_zero(authed_org_and_project):
+    _org_id, _project_id, _admin, admin_token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/admin/cost-summary", headers=_headers(admin_token))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body == {"rows": [], "total_calls": 0, "total_estimated_cost_usd": None}
+
+
+@pytest.mark.asyncio
+async def test_cost_summary_requires_org_administrator(app_session, authed_org_and_project):
+    org_id, project_id, admin, _admin_token = authed_org_and_project
+    _pm, pm_token = await _member(app_session, org_id, project_id, "project_manager", admin.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/admin/cost-summary", headers=_headers(pm_token))
+
+    assert response.status_code == 403

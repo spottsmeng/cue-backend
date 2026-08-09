@@ -22,9 +22,17 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_org_administrator
-from app.api.schemas import DelegationOut, MembershipOut, MembershipRoleLiteral, UserOut
+from app.api.schemas import (
+    CostSummaryOut,
+    CostSummaryRow,
+    DelegationOut,
+    MembershipOut,
+    MembershipRoleLiteral,
+    UserOut,
+)
 from app.core.db import get_session
 from app.identity.models import Delegation, Membership, User
+from app.llm.models import LLMUsageEvent
 from app.models import AuditLog, Budget, Commitment, Evidence, Project
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -246,4 +254,59 @@ async def export_project(
         content=zip_buffer.getvalue(),
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename=project_{project.id}_export.zip"},
+    )
+
+
+@router.get("/cost-summary", response_model=CostSummaryOut)
+async def read_cost_summary(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_org_administrator)],
+    project_id: uuid.UUID | None = None,
+) -> CostSummaryOut:
+    """NFR-OBS-03 / PRD §13's "cost per active project" row, made real for
+    the first time — app/llm/cost.py's record_llm_usage has written real
+    LLMUsageEvent rows since the Hardening session (backend/PROGRESS.md's
+    M10), attributed per project/organisation on every extraction/ask/
+    contradiction/write-back call, but nothing ever read them back over
+    the API until now. llm_usage_events carries its own tenant_isolation
+    RLS policy (migration 0a76bb463d69), so — unlike `parties`, which has
+    none — no explicit organisation_id filter is needed here; RLS already
+    confines every row this query can see to the caller's own org.
+    """
+    stmt = (
+        select(
+            LLMUsageEvent.project_id,
+            LLMUsageEvent.provider,
+            LLMUsageEvent.model,
+            func.count(LLMUsageEvent.id).label("call_count"),
+            func.coalesce(func.sum(LLMUsageEvent.tokens_in), 0).label("tokens_in"),
+            func.coalesce(func.sum(LLMUsageEvent.tokens_out), 0).label("tokens_out"),
+            func.sum(LLMUsageEvent.estimated_cost_usd).label("estimated_cost_usd"),
+        )
+        .group_by(LLMUsageEvent.project_id, LLMUsageEvent.provider, LLMUsageEvent.model)
+        .order_by(LLMUsageEvent.project_id, LLMUsageEvent.provider, LLMUsageEvent.model)
+    )
+    if project_id is not None:
+        stmt = stmt.where(LLMUsageEvent.project_id == project_id)
+    result = (await session.execute(stmt)).all()
+
+    rows = [
+        CostSummaryRow(
+            project_id=r.project_id,
+            provider=r.provider,
+            model=r.model,
+            call_count=r.call_count,
+            tokens_in=r.tokens_in,
+            tokens_out=r.tokens_out,
+            estimated_cost_usd=(
+                float(r.estimated_cost_usd) if r.estimated_cost_usd is not None else None
+            ),
+        )
+        for r in result
+    ]
+    known_costs = [row.estimated_cost_usd for row in rows if row.estimated_cost_usd is not None]
+    return CostSummaryOut(
+        rows=rows,
+        total_calls=sum(row.call_count for row in rows),
+        total_estimated_cost_usd=sum(known_costs) if known_costs else None,
     )
