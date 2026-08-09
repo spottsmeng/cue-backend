@@ -70,6 +70,18 @@ jobs:
         # throwaway server before accepting connections on the real one).
         run: docker compose up -d --wait
 
+      - name: Install OCR/PDF system dependencies
+        # pytesseract (pyproject.toml) is only a thin wrapper around the
+        # `tesseract` binary — installing the Python package via `uv sync`
+        # does not put the binary on PATH. ubuntu-latest ships neither
+        # tesseract nor poppler's `pdftotext` by default, and the Playwright
+        # install step above only pulls Chromium's own OS deps, not these.
+        # chi-sim matches TesseractOCRClient's default `eng+chi_sim`
+        # language pair (app/capture/media.py).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-chi-sim poppler-utils
+
       - name: Run pytest
         # tests/conftest.py creates and migrates cue_test itself every run —
         # no separate migration or database-creation step needed here.

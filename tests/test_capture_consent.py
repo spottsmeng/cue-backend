@@ -6,7 +6,7 @@ checks before persisting a Message.
 
 import pytest
 
-from app.capture.adapters.nextcloud import NextcloudAdapter
+from app.capture.adapters.nextcloud import NextcloudAdapter, NextcloudCaptureSettings
 from app.capture.consent import is_opted_out, post_consent_notice, upsert_consent_record
 from app.models import Channel, ConsentRecord, Party
 from tests.conftest import set_org_context
@@ -101,8 +101,17 @@ async def test_file_storage_capability_adapter_has_no_send_concept():
     to — the real NextcloudAdapter's send() raises NotImplementedError
     (existing, correct ChannelAdapter.send() behaviour, per its own
     docstring), which is why item 3's pipeline is expected to simply never
-    call post_consent_notice for a file_storage channel at all."""
-    adapter = NextcloudAdapter()
+    call post_consent_notice for a file_storage channel at all.
+
+    Settings passed explicitly rather than read from ambient env/.env: this
+    is a unit test of send()'s NotImplementedError, not a live-connectivity
+    test (tests/test_capture_adapters_live.py owns that, skipif-gated on
+    real CUE_NEXTCLOUD_* credentials) — it shouldn't fail in CI just because
+    no .env exists there, and it shouldn't risk flipping the live test's
+    skip condition by relying on real-looking env vars either."""
+    adapter = NextcloudAdapter(
+        NextcloudCaptureSettings(base_url="http://ci.invalid", username="ci", app_password="ci")
+    )
     channel = Channel(type="nextcloud", external_ref="/CUE")
     with pytest.raises(NotImplementedError):
         await adapter.send(channel, "irrelevant", "irrelevant")
