@@ -17,6 +17,13 @@ from app.twin.models import (
     TwinAuditLog,
 )
 from app.documents.models import Document, DocumentAuditLog, DocumentVersion, SpecClaim
+from app.capture.models import (
+    ChannelExtractionSchedule,
+    ChannelHealthEvent,
+    Message,
+    MessageMedia,
+    PartyOrganisationMapping,
+)
 from app.foresight.models import (
     Deviation,
     ForesightAuditLog,
@@ -73,4 +80,9 @@ __all__ = [
     "AskConversation",
     "AskTurn",
     "VendorMetric",
+    "Message",
+    "MessageMedia",
+    "ChannelHealthEvent",
+    "PartyOrganisationMapping",
+    "ChannelExtractionSchedule",
 ]

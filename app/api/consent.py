@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_org_administrator
 from app.api.schemas import ConsentActionRequest, ConsentRecordOut, ConsentStatusLiteral
+from app.capture.consent import upsert_consent_record
 from app.core.db import get_session
 from app.identity.models import User
 from app.models import ConsentRecord, Party, Project
@@ -131,33 +132,13 @@ async def consent_action_request(
     if party is None:
         raise HTTPException(status_code=422, detail=f"party_id: no such party {body.party_id}")
 
-    existing = (
-        await session.execute(
-            select(ConsentRecord).where(
-                ConsentRecord.party_id == body.party_id, ConsentRecord.project_id == body.project_id
-            )
-        )
-    ).scalar_one_or_none()
-    if existing is not None:
-        existing.status = body.status
-        existing.evidence = body.evidence
-        if body.notice_sent_at is not None:
-            existing.notice_sent_at = body.notice_sent_at
-        await session.flush()
-        # updated_at has a server-side onupdate=func.now() — same
-        # MissingGreenlet trap app/api/commitments.py's _refresh_updated_at
-        # documents.
-        await session.refresh(existing, attribute_names=["updated_at"])
-        await session.commit()
-        return existing
-
-    record = ConsentRecord(
+    record = await upsert_consent_record(
+        session,
         party_id=body.party_id,
         project_id=body.project_id,
-        notice_sent_at=body.notice_sent_at,
         status=body.status,
         evidence=body.evidence,
+        notice_sent_at=body.notice_sent_at,
     )
-    session.add(record)
     await session.commit()
     return record

@@ -231,6 +231,53 @@ async def test_create_document_with_class_code_at_upload(authed_org_and_project)
     assert response.json()["class_term_id"] is not None
 
 
+_REAL_MINIMAL_PDF = b"""%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/Resources<</Font<</F1 4 0 R>>>>/MediaBox[0 0 200 200]/Contents 5 0 R>>endobj
+4 0 obj<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>endobj
+5 0 obj<</Length 58>>
+stream
+BT /F1 18 Tf 20 100 Td (Hello CUE PDF test) Tj ET
+endstream
+endobj
+xref
+0 6
+trailer<</Size 6/Root 1 0 R>>
+%%EOF"""
+
+
+@pytest.mark.asyncio
+async def test_upload_without_extracted_text_auto_derives_it_from_a_real_pdf(authed_org_and_project):
+    """Prompt 11 item 6: real OCR/parsing, not a caller-supplied stand-in,
+    now backs DocumentVersion.extracted_text when the caller doesn't supply
+    it — app/documents/service.py's _derive_extracted_text, real pdftotext
+    underneath (app/capture/media.py's extract_pdf_text)."""
+    org_id, project_id, user, token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/projects/{project_id}/documents",
+            headers=_headers(token),
+            data={"name": "Real PDF upload"},
+            files={"file": ("real.pdf", _REAL_MINIMAL_PDF, "application/pdf")},
+        )
+    assert response.status_code == 201, response.text
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        search = await client.get(
+            f"/projects/{project_id}/documents/search",
+            headers=_headers(token),
+            params={"q": "CUE"},
+        )
+    assert search.status_code == 200
+    results = search.json()
+    assert len(results) == 1
+    assert results[0]["document"]["name"] == "Real PDF upload"
+
+
 @pytest.mark.asyncio
 async def test_search_documents_full_text(authed_org_and_project):
     """FR-DOC-05: Postgres full-text search over DocumentVersion.extracted_text."""

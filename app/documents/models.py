@@ -103,14 +103,19 @@ class DocumentVersion(Base, UUIDPk, Timestamped):
     but-fully-real" posture, reused here) the uploading user's own action
     when there's no message to point at.
 
-    OCR/document-parsing is explicitly out of scope this session
-    (CUE-Tech-Stack.md §2.4 names PaddleOCR/Docling as the real production
-    choice) — `extracted_text` is plain text supplied directly by the
-    caller at upload, standing in for what a real OCR/parsing pipeline would
-    derive from `storage_ref`'s binary. `search_vector` and `embedding` are
-    both derived from this same stand-in text, so both are honestly as
-    incomplete as it is; not a discrepancy to fix later, a direct
-    consequence of this session's own documented scope limit.
+    OCR/document-parsing (FR-NRM-05) is now real, not a caller-supplied
+    stand-in — app/documents/service.py's `_derive_extracted_text` calls
+    into app/capture/media.py (Prompt 11 item 6) for PDF/Office text and
+    image OCR whenever a caller doesn't supply `extracted_text` explicitly.
+    CUE-Tech-Stack.md §2.4 names PaddleOCR/Docling as the real *production*
+    choice for CJK OCR and table-fidelity document parsing specifically —
+    what's actually wired is the real, lighter FOSS-substitute posture
+    app/capture/media.py's own module docstring explains (Tesseract,
+    pdftotext, python-docx/pptx/openpyxl), not those two libraries
+    specifically. An explicitly caller-supplied `extracted_text` still wins
+    over auto-derivation (unchanged from before this session). `search_vector`
+    and `embedding` are both derived from this same field, so both are only
+    as complete as whichever extractor (or caller override) produced it.
     """
 
     __tablename__ = "document_versions"

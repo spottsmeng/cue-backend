@@ -18,7 +18,7 @@ there yet.
 | M5 | Living WIP & reporting | `Prompt 8 — Living WIP and reporting.txt` | §15 Phase 4 (backend half) | M1, M2, M4 | Done (2026-08-08) |
 | M6 | Ask & retrieval | `Prompt 9 — Ask and retrieval.txt` | §15 Phase 7 (backend half) | M3, M4 | Done (2026-08-08) |
 | M7 | Vendor Reliability Graph | `Prompt 10 — Vendor Reliability Graph.txt` | §15 Phase 10 (backend half) | M2 | Done (2026-08-08) |
-| M8 | Real channel capture | `Prompt 11 — Real channel capture.txt` | §15 Phase 1 | M2, M4 | Not started on Prompt 11's full scope (queue, normaliser, identity resolver, media pipeline, ASR, consent, gap detection) — genuinely gated on Pico credentials for WhatsApp/WeChat/Graph either way. Registry groundwork landed ahead of schedule (see M8 notes below): `channel_types` reference table + `ChannelAdapter` Protocol + FOSS adapters (Mattermost/IMAP-SMTP/Nextcloud), so the rest of this milestone builds on an open registry, not the closed enum it originally would have |
+| M8 | Real channel capture | `Prompt 11 — Real channel capture.txt`, `Prompt 11b — Real channel capture (continued).txt` | §15 Phase 1 | M2, M4 | **Done**, with the same per-adapter honesty this milestone has had since item 2: items 1, 3–12 all genuinely built and tested this session (see M8 notes below) — real for everything not credential-blocked (Mattermost/IMAP-SMTP/Nextcloud capture, identity resolution, party-org effective-dating, consent, capture health, gap reconciliation, scheduled windows, FR-DOC-09 drift) or dependency-blocked in this sandbox (PaddleOCR, FunASR SenseVoice — real FOSS substitutes run instead, see below); code-complete/credential-blocked for WhatsApp/WeChat/Graph, unchanged from item 2 |
 | M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Not started |
 | M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Not started |
 
@@ -752,11 +752,10 @@ detection, FR-DOC-09), read this section — the foundation those items build on
   not a duplicated credential block. `tests/test_sharepoint_adapter.py` was updated for the new
   two-settings-object shape (`GraphSharePointAdapter(settings, graph_settings)`); every other
   existing test in the suite passed unmodified.
-- **Not yet built**: the ingestion queue, normaliser, identity resolver, media pipeline, ASR, consent
-  wiring, capture-health scheduling, gap detection/backfill, scheduled extraction windows, and
-  FR-DOC-09 — Prompt 11 items 3-12, still fully open. They now consume `get_adapter(channel.type)`
+- **Items 1, 3–12 (Prompt 11b) are now built**, in a follow-up session — see "M8 items 1, 3-12 notes"
+  below for the full account. They consume `get_adapter(channel.type)`
   (`app/capture/adapters/registry.py`) and FK-backed `ChannelIdentity.channel_type` instead of the
-  closed enum, but none of that consumption exists yet.
+  closed enum, as this section originally anticipated.
 - **Mattermost/Nextcloud/GreenMail are real, running local instances, not just code** —
   `docker-compose.yml` gained `nextcloud`, `mattermost` (+ dedicated `mattermost_postgres`, since
   Mattermost has no SQLite support), and `greenmail` (a purpose-built open-source test mail server —
@@ -822,6 +821,138 @@ detection, FR-DOC-09), read this section — the foundation those items build on
     `Quote ready, live-test-<hash>` message lands in a real inbox on every run. Accepted deliberately,
     not overlooked — matches the explicit "if a message needs to be sent/received, I need this to
     genuinely happen" requirement driving this swap.
+
+### M8 items 1, 3-12 notes for later sessions
+
+Follow-up session, driven by `Prompt 11b — Real channel capture (continued).txt`. Read that file and
+`Prompt 11 — Real channel capture.txt` in full before touching anything in `app/capture/` — this
+section summarizes what landed, not a replacement for either prompt. Baseline at the start of this
+session: 363 passing. At the end: **447 passing**, real Postgres/MinIO/Valkey/Mattermost/Nextcloud/
+GreenMail infrastructure throughout, zero mocks.
+
+- **Item 1 — Message model + migration** (`app/capture/models.py`, migration `b6e4a1c9f235`):
+  `Message` (the canonical envelope FR-NRM-01 asks for), `MessageMedia` (FR-CAP-12's original-vs-
+  derived split — `source_uri`/`storage_key`/`thumbnail_key`/`ocr_text`/`exif`/`transcript*`),
+  `ChannelHealthEvent` (item 9's durable history) and `PartyOrganisationMapping` (item 5) all landed
+  in this one migration, since item 1's own schema is what every later item builds on.
+  `Evidence.message_id` finally got its real FK (`ix_evidence_message_id`,
+  `evidence_message_id_fkey`) — resolved by `app/capture/pipeline.py`'s `_finalise_message_evidence`,
+  not by `app/ledger/extractor.py` itself (left untouched, per CLAUDE.md/Prompt 11b). `channel_id`
+  gained a `source_uri`/`fetch_media` addition mid-session — see item 6's own bullet for why item 2's
+  `ChannelAdapter` Protocol needed a genuinely new method.
+- **Item 4 — Identity resolver** (`app/capture/identity.py`): real confidence ladder — exact
+  `channel_identities` match (1.0) > case-insensitive display-name match to an existing Party (0.6,
+  deliberately low, FR-LED-07-style "needs a human look") > brand-new Party (1.0, unambiguous first
+  sighting). `set_manual_identity_override` + `/admin/channel-identities` (`app/api/identities.py`)
+  close FR-NRM-03's "manual override" half. Deliberately does **not** touch
+  `app/ledger/extractor.py`'s `_get_or_create_party` — that exact-string path stays the FixtureAdapter/
+  cue-eval path unchanged, per Prompt 11's own instruction; the two converge on the same Party row via
+  matching `display_name`, not by one calling the other (see `app/capture/extraction_bridge.py`).
+- **Item 5 — Party-org effective dating** (`app/parties/organisation_mapping.py` + the
+  `party_organisation_mappings` table from item 1's migration): open-ended-range effective-dating
+  (`effective_to IS NULL` = current), enforced at the service layer (closes the prior mapping before
+  opening a new one), person/vendor_org type-checked in code. `/parties/{id}/organisation` (GET
+  current+history, POST to set) added to `app/api/parties.py`, admin-gated.
+- **Item 8 — Consent** (`app/capture/consent.py`): `post_consent_notice` calls
+  `ChannelAdapter.send()` with a real bilingual (EN/ZH) notice and upserts `ConsentRecord`;
+  `is_opted_out` is the normaliser's own gate. `app/api/consent.py`'s `consent_action_request` was
+  refactored to share the same `upsert_consent_record` rather than keeping a second copy.
+- **Item 3 — Ingestion queue** (`app/capture/normalise.py`, `pipeline.py`, `worker.py`): arq (already
+  in this codebase, M4) reused, not a second queue. `detect_language` is a real Unicode-script-ratio
+  heuristic (Han vs. Latin-word density), not a stub — it's the one approach that actually answers
+  FR-NRM-02's "is this code-switched" question, which a single-best-guess language-ID library
+  structurally can't. Per-channel ordering is `_job_id`-based mutual exclusion
+  (`enqueue_channel_ingestion`'s `f"ingest-channel-{channel_id}"`), not a per-channel queue arq doesn't
+  have — documented in `worker.py`'s own module docstring, including why. At-least-once safety is
+  FR-CAP-11's `payload_hash` dedup (`messages_project_payload_hash_key`) plus
+  `extraction_attempted_at`/`storage_key` idempotency guards at every downstream step. Real captured
+  messages feed the *same*, untouched `extract_case` fixture cases always used
+  (`app/capture/extraction_bridge.py` builds the `ProjectContext`/`FixtureCase` shapes from a real
+  `Project`/`Message` instead of `cases.json`).
+- **Item 6 — Media pipeline** (`app/capture/media.py`, `media_pipeline.py`): reuses
+  `app/documents/storage.py`'s `StorageBackend` (real MinIO), never a second abstraction.
+  **Real, working, tested**: EXIF (Pillow, already a transitive dep — datetime + GPS decimal-degree
+  math verified in tests), thumbnails (Pillow), OCR via **Tesseract** (`pytesseract`, a genuine FOSS
+  substitute — the system `tesseract` binary was already present in this sandbox), PDF text
+  (`pdftotext`, poppler, also already present), DOCX/PPTX/XLSX text (`python-docx`/`openpyxl`, both
+  added; `python-pptx` was already a dependency). **CUE-Tech-Stack.md §2.4's actual named production
+  choice is PaddleOCR/Docling, not these** — `PaddleOCRClient` exists in `app/capture/media.py`,
+  lazy-imports `paddleocr`, and is **dependency-blocked in this sandbox** (paddlepaddle's full
+  install was judged too heavy for this session's time budget) — same "code-complete,
+  X-blocked" honesty this milestone has had since item 2, applied to a library instead of a
+  credential. `get_default_ocr_client()` prefers Paddle if it's ever installed, falls back to
+  Tesseract otherwise. **Every adapter gained a real `fetch_media(channel, uri) -> bytes` method**
+  (item 2's `ChannelAdapter` Protocol didn't anticipate needing one) — real and live-tested for
+  Mattermost (`GET /files/{id}`), Nextcloud (`NextcloudWebDavClient.get_by_href` — a real href-vs-
+  relative-path bug was caught and fixed by the live test, not by inspection), and IMAP/SMTP (a
+  genuinely new capability: attachment extraction + `fetch_media` re-locates by `Message-ID`, since
+  IMAP sequence numbers aren't stable across connections); WeChat Work's raises `NotImplementedError`
+  (media is E2E-encrypted the same as its text, same wall `_decrypt_archive_chunk` already hit);
+  Graph's works for `sharepoint` only (`teams`/`outlook` attachment extraction is a documented,
+  bounded gap — that whole adapter is credential-blocked/untested regardless). `documents/service.py`
+  now **really** derives `DocumentVersion.extracted_text` when a caller doesn't supply it
+  (`_derive_extracted_text`), closing the Documents session's own "OCR/parsing not yet wired"
+  limitation — verified via a real PDF upload through the actual `/documents` endpoint.
+- **Item 7 — ASRClient Protocol** (`app/capture/asr.py`): `FasterWhisperClient` is **genuinely
+  installed and tested** — real speech (macOS `say` + `afconvert`, both system tools, no new
+  dependency) transcribed by a real `faster-whisper` model (`tiny`, chosen deliberately small for a
+  fast dev/CI download; a real deployment should size this against FR-VOI-06 measurements once there's
+  a corpus). Per-utterance confidence (FR-VOI-04) via `exp(avg_logprob)`. `SenseVoiceClient`
+  (CUE-Tech-Stack.md's actual named Chinese choice) is **dependency-blocked** the same way
+  PaddleOCR is — `funasr` pulls in the full PyTorch stack, judged too heavy for this session;
+  `get_default_asr_client` falls back to FasterWhisper for Chinese/code-switched hints too.
+  Wired into `media_pipeline.py`'s `voice_note` branch; a pure-voice message's transcript is copied
+  onto `Message.text` so extraction has something to read (verified end to end: real synthesized
+  speech → real ASR → real scripted-LLM extraction → real `Commitment` + `Evidence`, with
+  `Evidence.media_ref` a real signed MinIO URL and `Evidence.transcript_confidence` populated —
+  FR-VOI-05).
+- **Item 9 — Capture health** (`app/capture/health.py`): every adapter's `health()` now actually gets
+  called, on a 15-minute arq cron (`run_capture_health_sweep`) — FR-CAP-09's own SLA number, not this
+  file's usual "arbitrary starting point" disclaimer. Writes directly to `Channel.healthy` /
+  `ChannelHealthEvent` rather than making an authenticated HTTP self-call to the existing
+  `POST /channels/{id}/health` — that endpoint's own docstring already named the reason (no
+  service-account/agent identity exists yet). A healthy→unhealthy transition logs at ERROR
+  (`CAPTURE HEALTH DEGRADED`); routed as a direct log, not a Foresight `Notification`, since
+  `Notification`'s own CHECK constraint requires a risk/deviation/commitment subject a channel-health
+  event structurally isn't — Prompt 11b's own text names "a direct log/alert otherwise" as the
+  accepted fallback. `GET /channels/{id}/health/history` closes the Governance session's own noted gap
+  ("no consumer of channel health history exists yet").
+- **Item 10 — Gap detection/backfill** (`app/capture/reconciliation.py`): gap = a channel's own
+  recent cadence (median of its last 10 messages' inter-arrival gaps) exceeded by 3x, floored at 1
+  hour — the same per-entity-baseline idiom Silence Radar already established, applied at the
+  channel-transport layer. Backfill is a plain call into `pipeline.py`'s `ingest_channel_backlog`
+  (item 3's own function) with `since` rewound by one baseline gap — "each adapter's `fetch_backlog()`
+  is the backfill path" is Prompt 11's own instruction, not a separate recovery mechanism. Runs every
+  30 minutes (deliberately less frequent than the health check — a real `fetch_backlog()` call is
+  heavier than a health ping).
+- **Item 11 — Scheduled extraction windows** (Should; `ChannelExtractionSchedule`, migration
+  `c9f2a6e5d1b7`, `app/capture/schedule.py`): mirrors `app/reports/models.py`'s
+  `ReportScheduleConfig`/`schedule.py` shape closely (interval-minutes instead of day/hour-of-week).
+  Deliberately minimal per Prompt 11's own "don't over-invest" instruction — schema + the arq reader
+  only, no admin CRUD API in this pass (same "mechanism exists, not a v1 feature commitment" posture
+  `MilestoneArchetype.organisation_id` already has elsewhere).
+- **Item 12 — FR-DOC-09** (`app/documents/drift.py`): best-effort filename resolution
+  (case-insensitive exact match — deliberately not fuzzy, a wrong match would be worse than no check)
+  from a document-kind `MessageMedia` to a `Document`, then a real SHA-256 comparison against the
+  approved version's stored bytes. A mismatch raises a real `Risk` (`source="contradiction"` — the
+  existing enum value, not a new one added for this one caller) through the *same*
+  `create_or_supersede_risk` → `dispatch_event` → `draft_deviation` chain
+  `app/foresight/contradiction.py` already established, landing a real, FR-FOR-10-deduplicated
+  `Deviation` (`class_code="spec_drift"`). Wired into `media_pipeline.py`'s `document` branch, so it
+  runs the moment a circulated file's bytes are safely stored.
+- **New dependencies added this session** (all lightweight — no torch, no paddlepaddle):
+  `pytesseract`, `python-docx`, `openpyxl`, `faster-whisper` (pulls in `ctranslate2`/`av`/`onnxruntime`,
+  all precompiled wheels, no build step). `PIL`/Pillow was already present transitively.
+- **Two real, live infrastructure bugs this session's own tests caught, not inspection**:
+  `NextcloudWebDavClient.get(remote_path)` double-prefixed `_dav_root` when given a PROPFIND `href`
+  (already-absolute) instead of a caller-relative path — fixed by adding `get_by_href`, kept `get`
+  unchanged for the write-back adapter's own relative-path calls. `ImapSmtpAdapter` never populated
+  `RawCapturedMessage.media` at all before this session (no attachment extraction existed) — real gap,
+  now closed with a live round-trip test against a real sent email with a real attachment.
+- **Every genuinely credential-blocked adapter stayed credential-blocked** — WhatsApp, WeChat Work and
+  Graph's `teams`/`outlook` are unchanged from item 2's own honest state. Graph's `sharepoint` gained a
+  real `fetch_media` implementation (code-complete, same credential-blocked status as the rest of that
+  adapter — genuinely untestable in this environment, not run against anything live).
 
 ## Updating this file
 

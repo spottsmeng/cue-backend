@@ -5,10 +5,17 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_org_finance
+from app.api.deps import require_org_administrator, require_org_finance
+from app.api.schemas import PartyOrganisationMappingOut, PartyOrganisationMappingSet
 from app.core.db import get_session
 from app.identity.models import User
 from app.models import Party
+from app.parties.organisation_mapping import (
+    OrganisationMappingError,
+    get_current_organisation,
+    get_organisation_history,
+    set_current_organisation,
+)
 from app.parties.reliability import get_reliability_history, get_reliability_metrics
 from app.parties.schema import (
     VendorMetricNameLiteral,
@@ -112,3 +119,54 @@ async def read_vendor_reliability_history(
         metric=metric,
         history=[_metric_out(s) for s in snapshots],
     )
+
+
+# FR-NRM-04: a person's effective-dated vendor-company mapping — a
+# roster-management action, gated by require_org_administrator (same
+# reasoning app/api/consent.py's own admin-only surface already gives),
+# not require_org_finance's Procurement-tier read access above.
+organisation_router = APIRouter(prefix="/parties/{party_id}/organisation", tags=["parties"])
+
+
+@organisation_router.get("", response_model=list[PartyOrganisationMappingOut])
+async def read_party_organisation_history(
+    party_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_org_administrator)],
+) -> list:
+    await _get_party(session, admin.organisation_id, party_id)
+    return await get_organisation_history(session, party_id)
+
+
+@organisation_router.get("/current", response_model=PartyOrganisationMappingOut | None)
+async def read_party_current_organisation(
+    party_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_org_administrator)],
+):
+    await _get_party(session, admin.organisation_id, party_id)
+    return await get_current_organisation(session, party_id)
+
+
+@organisation_router.post("", response_model=PartyOrganisationMappingOut, status_code=201)
+async def set_party_organisation(
+    party_id: uuid.UUID,
+    body: PartyOrganisationMappingSet,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    admin: Annotated[User, Depends(require_org_administrator)],
+):
+    await _get_party(session, admin.organisation_id, party_id)
+    await _get_party(session, admin.organisation_id, body.organisation_party_id)
+    try:
+        mapping = await set_current_organisation(
+            session,
+            organisation_id=admin.organisation_id,
+            person_party_id=party_id,
+            organisation_party_id=body.organisation_party_id,
+            role_title=body.role_title,
+            effective_from=body.effective_from,
+        )
+    except OrganisationMappingError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    await session.commit()
+    return mapping

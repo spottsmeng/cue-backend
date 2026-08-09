@@ -449,6 +449,22 @@ class ChannelHealthSignal(BaseModel):
     detail: dict | None = None
 
 
+class ChannelHealthEventOut(BaseModel):
+    """FR-CAP-09's durable health history (app/capture/models.py's
+    ChannelHealthEvent, written by app/capture/health.py's
+    run_capture_health_sweep) — the consumer surface
+    backend/PROGRESS.md's M2 notes named as not yet existing ("no consumer
+    of channel health history exists yet")."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    channel_id: uuid.UUID
+    healthy: bool
+    detail: dict | None
+    checked_at: datetime
+
+
 class ConsentRecordOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -473,6 +489,59 @@ class ConsentActionRequest(BaseModel):
     status: ConsentStatusLiteral
     evidence: str | None = None
     notice_sent_at: datetime | None = None
+
+
+class ChannelIdentityOut(BaseModel):
+    """FR-NRM-03: a resolved (channel_type, external_id) -> Party mapping —
+    read surface over app/models/party.py's ChannelIdentity, for an
+    Administrator reviewing low-confidence auto-resolutions."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    party_id: uuid.UUID
+    channel_type: str
+    external_id: str
+    confidence: float
+    manually_verified: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+class ChannelIdentityOverrideRequest(BaseModel):
+    """FR-NRM-03's "manual override" — app/capture/identity.py's
+    set_manual_identity_override. Upserts by (channel_type, external_id):
+    an Administrator correcting either a brand-new mapping or one the
+    resolver already auto-created at lower confidence."""
+
+    channel_type: str
+    external_id: str
+    party_id: uuid.UUID
+
+
+class PartyOrganisationMappingOut(BaseModel):
+    """FR-NRM-04: one row of a person's effective-dated vendor-company
+    history (app/parties/organisation_mapping.py)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    person_party_id: uuid.UUID
+    organisation_party_id: uuid.UUID
+    role_title: str | None
+    effective_from: datetime
+    effective_to: datetime | None
+
+
+class PartyOrganisationMappingSet(BaseModel):
+    """FR-NRM-04's write path — app/parties/organisation_mapping.py's
+    set_current_organisation. `effective_from` defaults to now (a mapping
+    discovered/declared today); pass an earlier timestamp to backdate a
+    correction discovered after the fact."""
+
+    organisation_party_id: uuid.UUID
+    role_title: str | None = None
+    effective_from: datetime | None = None
 
 
 class RetentionPolicyOut(BaseModel):

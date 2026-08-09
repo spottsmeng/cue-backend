@@ -5,6 +5,7 @@ from datetime import datetime, timezone as dt_timezone
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.capture.media import extract_document_text, get_default_ocr_client
 from app.documents.audit import record_document_audit_event
 from app.documents.models import Document, DocumentVersion
 from app.documents.sharepoint import SharePointAdapter
@@ -67,6 +68,35 @@ async def _next_version_no(session: AsyncSession, document_id: uuid.UUID) -> int
     return (current_max or 0) + 1
 
 
+async def _derive_extracted_text(filename: str | None, content_type: str, file_bytes: bytes) -> str | None:
+    """Prompt 11 item 6: "this is also where the Documents session's
+    'OCR/parsing not yet wired' limitation... gets resolved; connect real
+    capture's media pipeline output into DocumentVersion's extracted-text
+    field rather than building a separate text-extraction path." Reuses
+    app/capture/media.py's real extractors (PDF/Office via
+    extract_document_text, images via the real OCR client) rather than this
+    module inventing a second text-extraction path of its own — only called
+    when the caller didn't supply extracted_text explicitly (a caller who
+    did is trusted over an auto-derived guess, same as before this change).
+    Returns None, not an exception, for anything neither extractor
+    recognises (a plain image format not real OCR handles well, or a
+    filename/content-type combination with no matching extractor) — a
+    freshly-ingested document with no derivable text is still a valid,
+    storable Document; this was already true before this function existed.
+    """
+    document_text = extract_document_text(filename, file_bytes)
+    if document_text:
+        return document_text
+    if content_type.startswith("image/"):
+        try:
+            ocr_text = await get_default_ocr_client().extract_text(file_bytes)
+        except Exception:
+            logger.warning("OCR extraction failed for upload %r", filename, exc_info=True)
+            return None
+        return ocr_text or None
+    return None
+
+
 async def _write_version(
     session: AsyncSession,
     *,
@@ -76,6 +106,7 @@ async def _write_version(
     content_type: str,
     extracted_text: str | None,
     evidence: Evidence,
+    filename: str | None = None,
 ) -> DocumentVersion:
     """Shared by create_document (first version) and add_version (every
     version after) — one place that mints the storage key, writes the
@@ -85,6 +116,9 @@ async def _write_version(
     version_no = await _next_version_no(session, document.id)
     storage_ref = f"documents/{document.id}/v{version_no}/{uuid.uuid4()}"
     await storage.put(storage_ref, file_bytes, content_type)
+
+    if extracted_text is None:
+        extracted_text = await _derive_extracted_text(filename, content_type, file_bytes)
 
     version = DocumentVersion(
         document_id=document.id,
@@ -113,11 +147,14 @@ async def create_document(
     class_code: str | None,
     evidence: Evidence,
     actor_id: uuid.UUID | None,
+    filename: str | None = None,
 ) -> Document:
     """FR-DOC-01/02: ingestion — a new Document plus its first
     DocumentVersion, in one call (the same "provision and populate in one
     request" shape app/api/projects.py's create_project already uses for a
-    Project plus its Twin graph)."""
+    Project plus its Twin graph). `filename` (typically the uploaded file's
+    own name) drives real text extraction when `extracted_text` isn't
+    supplied — see _derive_extracted_text."""
     document = Document(project_id=project.id, name=name)
     if class_code is not None:
         term = await _get_universal_ontology_term(session, "deliverable_class", class_code)
@@ -133,6 +170,7 @@ async def create_document(
         content_type=content_type,
         extracted_text=extracted_text,
         evidence=evidence,
+        filename=filename,
     )
     document.current_version_id = version.id
     await session.flush()
@@ -165,6 +203,7 @@ async def add_version(
     extracted_text: str | None,
     evidence: Evidence,
     actor_id: uuid.UUID | None,
+    filename: str | None = None,
 ) -> DocumentVersion:
     """FR-DOC-02: a new version, correctly superseding the old one —
     `document.current_version_id` is repointed here, in the same
@@ -177,6 +216,7 @@ async def add_version(
         content_type=content_type,
         extracted_text=extracted_text,
         evidence=evidence,
+        filename=filename,
     )
     document.current_version_id = version.id
     await session.flush()

@@ -243,6 +243,7 @@ async def create_document(
             class_code=class_code,
             evidence=evidence,
             actor_id=actor_id,
+            filename=file.filename,
         )
     except LookupError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
@@ -279,6 +280,7 @@ async def create_version(
         extracted_text=extracted_text,
         evidence=evidence,
         actor_id=actor_id,
+        filename=file.filename,
     )
     await session.commit()
     return _to_version_out(version, document, storage)

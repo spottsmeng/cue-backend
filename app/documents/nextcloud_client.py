@@ -32,7 +32,8 @@ class NextcloudWebDavClient:
     """
 
     def __init__(self, base_url: str, username: str, app_password: str):
-        self._dav_root = f"{base_url.rstrip('/')}/remote.php/dav/files/{username}"
+        self._base_url = base_url.rstrip("/")
+        self._dav_root = f"{self._base_url}/remote.php/dav/files/{username}"
         self._auth = httpx.BasicAuth(username, app_password)
 
     async def put(self, remote_path: str, content: bytes, content_type: str) -> None:
@@ -47,6 +48,23 @@ class NextcloudWebDavClient:
     async def get(self, remote_path: str) -> bytes:
         async with httpx.AsyncClient(timeout=60, auth=self._auth) as client:
             response = await client.get(f"{self._dav_root}/{remote_path.lstrip('/')}")
+            response.raise_for_status()
+            return response.content
+
+    async def get_by_href(self, href: str) -> bytes:
+        """`href` is a PROPFIND response's own `<d:href>` value
+        (`propfind_changes_since` below / `NextcloudFile.href`) — already a
+        full server-relative path (e.g.
+        `/remote.php/dav/files/cue/CUE-Capture/file.txt`), unlike `get`'s
+        `remote_path` (a caller-supplied path *relative to this client's own
+        dav_root*, e.g. `"CUE-Capture/file.txt"`). Prepending `_dav_root` to
+        an already-absolute href would double the `/remote.php/dav/files/
+        {username}` segment — this method exists specifically so
+        app/capture/adapters/nextcloud.py's fetch_media (which only ever has
+        a PROPFIND-sourced href to work from, per RawCapturedMedia.uri) uses
+        the correct base."""
+        async with httpx.AsyncClient(timeout=60, auth=self._auth) as client:
+            response = await client.get(f"{self._base_url}{href}")
             response.raise_for_status()
             return response.content
 

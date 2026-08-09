@@ -13,8 +13,10 @@ from app.api.consent import router as consent_router
 from app.api.deviations import router as deviations_router
 from app.api.documents import router as documents_router
 from app.api.foresight_admin import quiet_hours_router, threshold_router
+from app.api.identities import router as identities_router
 from app.api.milestones import router as milestones_router
 from app.api.notifications import router as notifications_router
+from app.api.parties import organisation_router as party_organisation_router
 from app.api.parties import router as parties_router
 from app.api.projects import router as projects_router
 from app.api.reports import router as reports_router
@@ -45,6 +47,8 @@ app.include_router(quiet_hours_router)
 app.include_router(reports_router)
 app.include_router(ask_router)
 app.include_router(parties_router)
+app.include_router(party_organisation_router)
+app.include_router(identities_router)
 
 
 @app.get("/health")

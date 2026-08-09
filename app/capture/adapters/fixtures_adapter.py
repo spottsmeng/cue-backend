@@ -60,3 +60,6 @@ class FixtureAdapter:
 
     async def health(self, channel: Channel) -> ChannelHealthResult:
         return ChannelHealthResult(healthy=True, detail={"backend": "fixture"})
+
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        raise NotImplementedError("the fixture backend carries no real media to fetch")

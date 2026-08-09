@@ -80,6 +80,17 @@ class WhatsAppAdapter:
             logger.warning("whatsapp health check failed for channel=%s: %s", channel.id, e)
             return ChannelHealthResult(healthy=False, detail={"error": str(e)})
 
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """Same "this adapter's own reasonable contract for Pico's
+        companion-session gateway, not a documented external spec" posture
+        as every other method on this class (see class docstring) —
+        `/media/{media_id}` returning the raw bytes directly is the natural
+        counterpart to `/messages` and `/send` above."""
+        async with httpx.AsyncClient(timeout=60, headers=self._headers()) as client:
+            response = await client.get(f"{self._settings.session_endpoint}/media/{uri}")
+            response.raise_for_status()
+            return response.content
+
 
 def _to_raw_message(raw: dict) -> RawCapturedMessage:
     raw_bytes = raw.get("raw_bytes")

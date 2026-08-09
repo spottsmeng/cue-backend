@@ -186,8 +186,11 @@ class Evidence(Base, UUIDPk):
 
     message_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
+        ForeignKey("messages.id"),
         default=None,
-        comment="Points at the future Message/capture table — not modelled yet (Phase 1: Capture)",
+        index=True,
+        comment="app/capture/models.py's Message — real FK since Prompt 11 item 1; NULL for evidence "
+        "with no captured-message source (a manual entry, or a document/spec-claim's own evidence)",
     )
     channel: Mapped[str] = mapped_column(
         comment="provenance tag — channel_types.code by convention, but not FK-enforced: "

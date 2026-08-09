@@ -44,3 +44,21 @@ class ChannelAdapter(Protocol):
         """Item 9's active half of channel health — feeds the existing
         POST /channels/{id}/health receiving endpoint."""
         ...
+
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """Item 6's media pipeline (app/capture/media.py) — resolves a
+        RawCapturedMedia.uri (an adapter-specific fetch reference: a
+        Mattermost file id, a Nextcloud WebDAV href, a Graph driveItem id)
+        into the original bytes, to be preserved via StorageBackend
+        (FR-CAP-12: "at full fidelity"). Not part of item 2's original
+        Protocol — item 2's own scope was fetch_backlog/stream/send/health;
+        this method is item 6's addition, since nothing before it needed an
+        adapter to resolve a media reference into bytes at all. Raises
+        NotImplementedError for a channel/adapter with no way to fetch
+        media (WeChat Work's Session Archiving media is end-to-end
+        encrypted the same way its message text is — see
+        WeChatWorkAdapter's own docstring; a fixture has no real media to
+        fetch), the same "fail loudly, not silently" posture send() already
+        establishes for a capability gap.
+        """
+        ...

@@ -170,3 +170,23 @@ class GraphAdapter:
         except httpx.HTTPError as e:
             logger.warning("graph health check failed for channel=%s: %s", channel.id, e)
             return ChannelHealthResult(healthy=False, detail={"error": str(e)})
+
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """`sharepoint` only: `uri` is the driveItem id `_fetch_sharepoint`
+        already yields, `/drives/{id}/items/{itemId}/content` is Graph's own
+        download endpoint for it. `teams`/`outlook` don't populate
+        RawCapturedMedia at all yet (`_fetch_teams`/`_fetch_outlook`
+        above) — a bounded, documented gap (Teams hostedContents and
+        Outlook message attachments are each a materially different Graph
+        shape from driveItem content, and this whole adapter is
+        credential-blocked/untested regardless), not silently pretended to
+        work."""
+        if channel.type != "sharepoint":
+            raise NotImplementedError(
+                f"GraphAdapter.fetch_media does not yet support channel_types code {channel.type!r}"
+            )
+        drive_id = channel.external_ref
+        async with await self._client() as client:
+            response = await client.get(f"{GRAPH_BASE}/drives/{drive_id}/items/{uri}/content")
+            response.raise_for_status()
+            return response.content

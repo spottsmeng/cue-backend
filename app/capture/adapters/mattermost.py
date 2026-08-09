@@ -7,7 +7,12 @@ import httpx
 
 from app.capture.adapters.errors import CaptureConfigError
 from app.capture.config import MattermostSettings, get_mattermost_settings
-from app.capture.schema import ChannelHealthResult, RawCapturedMessage, compute_payload_hash
+from app.capture.schema import (
+    ChannelHealthResult,
+    RawCapturedMedia,
+    RawCapturedMessage,
+    compute_payload_hash,
+)
 from app.models import Channel
 
 logger = logging.getLogger("cue.capture.mattermost")
@@ -93,13 +98,30 @@ class MattermostAdapter:
             logger.warning("mattermost health check failed for channel=%s: %s", channel.id, e)
             return ChannelHealthResult(healthy=False, detail={"error": str(e)})
 
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """`uri` is a Mattermost file id (`_to_raw_message`'s own
+        `post["file_ids"]`) — `GET /files/{file_id}` returns the raw file
+        content directly (Mattermost's API, not a metadata wrapper)."""
+        async with self._client() as client:
+            response = await client.get(f"/files/{uri}")
+            response.raise_for_status()
+            return response.content
+
 
 def _to_raw_message(post: dict) -> RawCapturedMessage:
     raw_bytes = (post.get("message") or "").encode("utf-8")
+    # FR-CAP-12: Mattermost reports attached file ids on the post itself
+    # (`file_ids`), not full metadata (a MIME type would need a second
+    # `/files/{id}/info` call per file) — `kind` is left as the generic
+    # "document"; item 6's media pipeline (app/capture/media.py) branches
+    # on the actually-fetched bytes' content type where it needs to, not on
+    # this adapter's own guess.
+    media = [RawCapturedMedia(kind="document", uri=fid) for fid in post.get("file_ids") or []]
     return RawCapturedMessage(
         external_id=post["id"],
         sender_external_id=post["user_id"],
         sent_at=datetime.fromtimestamp(post["create_at"] / 1000, tz=timezone.utc),
         text=post.get("message"),
         raw_payload_hash=compute_payload_hash("mattermost", post["id"], raw_bytes),
+        media=media,
     )

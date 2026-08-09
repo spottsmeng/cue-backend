@@ -18,6 +18,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.ask.embed_worker import run_embedding_sweep
+from app.capture.health import run_capture_health_sweep
+from app.capture.reconciliation import run_gap_reconciliation_sweep
+from app.capture.schedule import run_due_extraction_schedules
+from app.capture.worker import ingest_channel_job
 from app.core.config import get_settings
 from app.core.db import async_session_factory
 from app.foresight.config import get_arq_settings
@@ -123,16 +127,30 @@ class WorkerSettings:
     `cron_jobs`/`redis_settings` attributes, referenced by dotted path on
     the command line (module docstring).
 
-    `run_due_report_schedules` (FR-RPT-09, app/reports/schedule.py) and
-    `run_embedding_sweep` (Prompt 9, app/ask/embed_worker.py) both ride this
-    same worker process rather than standing up a second arq/Valkey pair —
-    the same "don't over-invest in scheduling machinery" instruction Prompt
-    8 gave, applied again here. Not a Foresight concern living here by
-    accident; this class is simply the one background-job process this
-    codebase runs at all.
+    `run_due_report_schedules` (FR-RPT-09, app/reports/schedule.py),
+    `run_embedding_sweep` (Prompt 9, app/ask/embed_worker.py),
+    `ingest_channel_job` (Prompt 11 item 3, app/capture/worker.py),
+    `run_capture_health_sweep` (item 9, app/capture/health.py),
+    `run_gap_reconciliation_sweep` (item 10, app/capture/reconciliation.py)
+    and `run_due_extraction_schedules` (item 11, app/capture/schedule.py)
+    all ride this same worker process rather than standing up a second
+    arq/Valkey pair — the same "don't over-invest in scheduling machinery"
+    instruction Prompt 8 gave, applied again here. Not a Foresight concern
+    living here by accident; this class is simply the one background-job
+    process this codebase runs at all. `ingest_channel_job` is enqueued on
+    demand (item 10's own reconciliation, item 11's own schedule reader),
+    not itself a cron_jobs entry — unlike the other five, there is no fixed
+    "run every 15 minutes for every X" shape to it: which channels need
+    ingesting and when is exactly what item 10/11's own cron jobs (below)
+    decide. `run_capture_health_sweep` *is* a fixed-cadence cron_jobs entry
+    (every channel, every 15 minutes) — FR-CAP-09's own SLA number, not this
+    module's usual "not tuned against any measured load" disclaimer.
     """
 
-    functions = [run_foresight_sweep, run_due_report_schedules, run_embedding_sweep]
+    functions = [
+        run_foresight_sweep, run_due_report_schedules, run_embedding_sweep, ingest_channel_job,
+        run_capture_health_sweep, run_gap_reconciliation_sweep, run_due_extraction_schedules,
+    ]
     # Every 15 minutes — frequent enough that a real silence/forecast/
     # escalation condition surfaces promptly, infrequent enough not to
     # hammer Postgres with a full-tenant scan; not tuned against any
@@ -141,9 +159,24 @@ class WorkerSettings:
     # change once there's real traffic to tune against. The report schedule
     # scan shares this same cadence (app/reports/schedule.py's `_is_due`
     # docstring: hour-granularity schedules don't need a finer tick).
+    # run_capture_health_sweep's own 15-minute cadence is not this same
+    # "arbitrary starting point" — it is FR-CAP-09's literal SLA number.
     cron_jobs = [
         cron(run_foresight_sweep, minute=set(range(0, 60, 15))),
         cron(run_due_report_schedules, minute=set(range(0, 60, 15))),
         cron(run_embedding_sweep, minute=set(range(0, 60, 15))),
+        cron(run_capture_health_sweep, minute=set(range(0, 60, 15))),
+        # FR-CAP-10's own scheduled-window reader — same tick as every
+        # other 15-minute sweep; a schedule's own interval_minutes (checked
+        # by _is_due, app/capture/schedule.py) is what actually governs how
+        # often a given channel's window fires, this is just how often the
+        # check itself runs.
+        cron(run_due_extraction_schedules, minute=set(range(0, 60, 15))),
+        # FR-CAP-08's own reconciliation job — deliberately less frequent
+        # than the health check above: a triggered backfill calls a real
+        # fetch_backlog() against live channel infrastructure, materially
+        # heavier than a health ping, so this runs on the half-hour rather
+        # than every 15 minutes.
+        cron(run_gap_reconciliation_sweep, minute={0, 30}),
     ]
     redis_settings = RedisSettings(host=_arq_settings.redis_host, port=_arq_settings.redis_port)

@@ -10,7 +10,12 @@ from typing import AsyncIterator
 
 from app.capture.adapters.errors import CaptureConfigError
 from app.capture.config import ImapSmtpSettings, get_imap_smtp_settings
-from app.capture.schema import ChannelHealthResult, RawCapturedMessage, compute_payload_hash
+from app.capture.schema import (
+    ChannelHealthResult,
+    RawCapturedMedia,
+    RawCapturedMessage,
+    compute_payload_hash,
+)
 from app.models import Channel
 
 logger = logging.getLogger("cue.capture.imap_smtp")
@@ -71,15 +76,15 @@ class ImapSmtpAdapter:
                 sent_at = _parse_date(parsed) or datetime.now(timezone.utc)
                 if since is not None and sent_at <= since:
                     continue
+                message_id = parsed.get("Message-ID", uid.decode())
                 messages.append(
                     RawCapturedMessage(
-                        external_id=parsed.get("Message-ID", uid.decode()),
+                        external_id=message_id,
                         sender_external_id=email.utils.parseaddr(parsed.get("From", ""))[1],
                         sent_at=sent_at,
                         text=_extract_body(parsed),
-                        raw_payload_hash=compute_payload_hash(
-                            "imap_smtp", parsed.get("Message-ID", uid.decode()), raw_bytes
-                        ),
+                        raw_payload_hash=compute_payload_hash("imap_smtp", message_id, raw_bytes),
+                        media=_extract_attachments(parsed, message_id),
                     )
                 )
             return messages
@@ -136,6 +141,40 @@ class ImapSmtpAdapter:
             logger.warning("imap_smtp health check failed for channel=%s: %s", channel.id, e)
             return ChannelHealthResult(healthy=False, detail={"error": str(e)})
 
+    def _fetch_media_sync(self, uri: str) -> bytes:
+        message_id, _, part_index_str = uri.rpartition("::")
+        part_index = int(part_index_str)
+        s = self._settings
+        with self._imap_connect() as conn:
+            conn.login(s.username, s.password)
+            conn.select(s.mailbox)
+            # Re-locates by Message-ID (a stable, content-derived identity)
+            # rather than the sequence number _fetch_backlog_sync searched
+            # with — sequence numbers are only valid for the IMAP session
+            # that produced them, and fetch_media is always called from a
+            # later, separate connection (item 6's media pipeline runs after
+            # normalisation, not inline in fetch_backlog).
+            status, data = conn.search(None, f'(HEADER Message-ID "{message_id}")')
+            if status != "OK" or not data[0]:
+                raise FileNotFoundError(f"no message found for Message-ID {message_id!r}")
+            uid = data[0].split()[0]
+            status, msg_data = conn.fetch(uid, "(RFC822)")
+            if status != "OK" or not msg_data or msg_data[0] is None:
+                raise FileNotFoundError(f"could not re-fetch message {message_id!r}")
+            parsed = email.message_from_bytes(msg_data[0][1])
+            attachments = list(_iter_attachment_parts(parsed))
+            if part_index >= len(attachments):
+                raise FileNotFoundError(f"no attachment at index {part_index} in message {message_id!r}")
+            payload = attachments[part_index].get_payload(decode=True)
+            return payload or b""
+
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """`uri` is `_extract_attachments`' own `"{message_id}::{index}"`
+        encoding — email has no separate "media id" concept the way a chat
+        API does, so the message identity plus a part index is the
+        adapter's own stable reference."""
+        return await asyncio.to_thread(self._fetch_media_sync, uri)
+
 
 def _parse_date(parsed: email.message.Message) -> datetime | None:
     date_header = parsed.get("Date")
@@ -145,6 +184,33 @@ def _parse_date(parsed: email.message.Message) -> datetime | None:
     if parsed_date.tzinfo is None:
         parsed_date = parsed_date.replace(tzinfo=timezone.utc)
     return parsed_date
+
+
+def _iter_attachment_parts(parsed: email.message.Message):
+    if not parsed.is_multipart():
+        return
+    for part in parsed.walk():
+        if part.get_content_disposition() == "attachment":
+            yield part
+
+
+def _media_kind_for(content_type: str) -> str:
+    if content_type.startswith("image/"):
+        return "image"
+    return "document"
+
+
+def _extract_attachments(parsed: email.message.Message, message_id: str) -> list[RawCapturedMedia]:
+    """FR-CAP-12: email attachments as RawCapturedMedia, `uri` encoding a
+    stable (message, part-index) reference `fetch_media` above decodes."""
+    return [
+        RawCapturedMedia(
+            kind=_media_kind_for(part.get_content_type()),
+            uri=f"{message_id}::{i}",
+            filename=part.get_filename(),
+        )
+        for i, part in enumerate(_iter_attachment_parts(parsed))
+    ]
 
 
 def _extract_body(parsed: email.message.Message) -> str | None:

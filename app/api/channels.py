@@ -6,7 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_project, require_project_role
-from app.api.schemas import ChannelCreate, ChannelHealthSignal, ChannelOut
+from app.api.schemas import ChannelCreate, ChannelHealthEventOut, ChannelHealthSignal, ChannelOut
+from app.capture.models import ChannelHealthEvent
 from app.core.db import get_session
 from app.identity.service import ADMIN_ROLES
 from app.models import Channel, ChannelType, Project
@@ -118,6 +119,27 @@ async def report_channel_health(
     await _refresh_updated_at(session, channel)
     await session.commit()
     return channel
+
+
+@router.get("/{channel_id}/health/history", response_model=list[ChannelHealthEventOut])
+async def channel_health_history(
+    channel_id: uuid.UUID,
+    project: Annotated[Project, Depends(_require_admin)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[ChannelHealthEvent]:
+    """FR-CAP-09: the durable consumer surface over
+    app/capture/health.py's run_capture_health_sweep — closes the gap
+    backend/PROGRESS.md's M2 notes named ("no consumer of channel health
+    history exists yet"). Most recent first."""
+    channel = await _get_channel(session, project, channel_id)
+    events = (
+        await session.execute(
+            select(ChannelHealthEvent)
+            .where(ChannelHealthEvent.channel_id == channel.id)
+            .order_by(ChannelHealthEvent.checked_at.desc())
+        )
+    ).scalars().all()
+    return list(events)
 
 
 @router.post("/{channel_id}/reconnect", response_model=ChannelOut)

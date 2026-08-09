@@ -89,6 +89,50 @@ async def test_mattermost_send_and_fetch_backlog_round_trip():
     assert health.healthy is True
 
 
+@pytest.mark.skipif(not _MATTERMOST_CONFIGURED, reason="CUE_MATTERMOST_BASE_URL/_BOT_TOKEN not configured")
+@pytest.mark.asyncio
+async def test_mattermost_fetch_media_returns_real_uploaded_bytes():
+    """Item 6's fetch_media addition — uploads a real file to Mattermost,
+    posts it (so it shows up on `post['file_ids']`, `_to_raw_message`'s own
+    new media extraction), then fetches it back via the adapter and checks
+    the bytes round-trip exactly."""
+    import httpx
+
+    settings = MattermostSettings()
+    adapter = MattermostAdapter(settings)
+    channel = _channel("mattermost", _MATTERMOST_TEST_CHANNEL_ID)
+    marker = f"live-media-test-{uuid.uuid4().hex[:8]}"
+    content = f"live media test content {uuid.uuid4().hex}".encode()
+
+    async with httpx.AsyncClient(
+        base_url=f"{settings.base_url.rstrip('/')}/api/v4",
+        headers={"Authorization": f"Bearer {settings.bot_token}"},
+        timeout=30,
+    ) as client:
+        upload = await client.post(
+            "/files",
+            params={"channel_id": _MATTERMOST_TEST_CHANNEL_ID},
+            files={"files": (f"{marker}.txt", content, "text/plain")},
+        )
+        upload.raise_for_status()
+        file_id = upload.json()["file_infos"][0]["id"]
+
+        post = await client.post(
+            "/posts",
+            json={"channel_id": _MATTERMOST_TEST_CHANNEL_ID, "message": marker, "file_ids": [file_id]},
+        )
+        post.raise_for_status()
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=5)
+    matched = [m async for m in adapter.fetch_backlog(channel, since=since) if m.text == marker]
+    assert len(matched) == 1
+    assert len(matched[0].media) == 1
+    assert matched[0].media[0].uri == file_id
+
+    fetched = await adapter.fetch_media(channel, file_id)
+    assert fetched == content
+
+
 @pytest.mark.skipif(not _NEXTCLOUD_WRITEBACK_CONFIGURED, reason="CUE_SHAREPOINT_NEXTCLOUD_* not configured")
 @pytest.mark.asyncio
 async def test_nextcloud_write_back_creates_real_file():
@@ -131,6 +175,9 @@ async def test_nextcloud_capture_sees_externally_uploaded_file():
     assert matched[0].text is None
     assert matched[0].media[0].kind == "document"
 
+    fetched = await adapter.fetch_media(channel, matched[0].media[0].uri)
+    assert fetched == b"live integration test upload"
+
     health = await adapter.health(channel)
     assert health.healthy is True
 
@@ -160,3 +207,44 @@ async def test_imap_smtp_send_and_fetch_backlog_round_trip():
 
     health = await adapter.health(channel)
     assert health.healthy is True
+
+
+@pytest.mark.skipif(not _IMAP_SMTP_CONFIGURED, reason="CUE_IMAP_SMTP_* not configured")
+@pytest.mark.asyncio
+async def test_imap_smtp_fetch_media_returns_real_attachment_bytes():
+    """Item 6's own new capability — this adapter reported no media at all
+    before this session; a real email with a real attachment, sent and
+    fetched back through the same mailbox, is what proves
+    `_extract_attachments`/`fetch_media` actually work end to end."""
+    import smtplib
+    from email.message import EmailMessage
+
+    settings = ImapSmtpSettings()
+    adapter = ImapSmtpAdapter(settings)
+    channel = _channel("imap_smtp")
+    marker = f"live-attachment-test-{uuid.uuid4().hex[:8]}"
+    attachment_bytes = f"live attachment content {uuid.uuid4().hex}".encode()
+    to_address = settings.from_address or settings.username
+
+    msg = EmailMessage()
+    msg["From"] = settings.from_address or settings.username
+    msg["To"] = to_address
+    msg["Subject"] = "CUE live attachment test"
+    msg.set_content(marker)
+    msg.add_attachment(attachment_bytes, maintype="text", subtype="plain", filename=f"{marker}.txt")
+
+    with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as conn:
+        if settings.smtp_use_starttls:
+            conn.starttls()
+        conn.login(settings.username, settings.password, initial_response_ok=False)
+        conn.send_message(msg)
+
+    since = datetime.now(timezone.utc) - timedelta(minutes=5)
+    matched = [m async for m in adapter.fetch_backlog(channel, since=since) if marker in (m.text or "")]
+
+    assert len(matched) == 1
+    assert len(matched[0].media) == 1
+    assert matched[0].media[0].filename == f"{marker}.txt"
+
+    fetched = await adapter.fetch_media(channel, matched[0].media[0].uri)
+    assert fetched == attachment_bytes

@@ -102,6 +102,17 @@ class WeChatWorkAdapter:
             logger.warning("wechat work health check failed for channel=%s: %s", channel.id, e)
             return ChannelHealthResult(healthy=False, detail={"error": str(e)})
 
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """Same wall `_decrypt_archive_chunk` already documents: Session
+        Archiving media, like message text, is end-to-end encrypted with a
+        per-corp key only WeChat Work's own SDK can decrypt — a from-scratch
+        httpx client cannot fetch usable bytes here any more than it can
+        decrypt text, regardless of credentials."""
+        raise NotImplementedError(
+            "WeChat Work Session Archiving media requires binding the vendor's own SDK "
+            "against CUE_WECHAT_SESSION_ARCHIVE_SECRET — not implemented"
+        )
+
     def _decrypt_archive_chunk(self, raw_response: dict) -> list[dict]:
         """See class docstring — real decryption needs WeChat Work's own
         SDK bound against `session_archive_secret`, not implemented here.

@@ -83,6 +83,14 @@ class NextcloudAdapter:
             logger.warning("nextcloud health check failed for channel=%s: %s", channel.id, e)
             return ChannelHealthResult(healthy=False, detail={"error": str(e)})
 
+    async def fetch_media(self, channel: Channel, uri: str) -> bytes:
+        """`uri` is the WebDAV href RawCapturedMedia.uri already carries
+        (this class's own `_to_raw_message`, from PROPFIND) — an absolute
+        server-relative path, not a dav_root-relative one, so this goes
+        through get_by_href, not the plain get() the write-back adapter
+        uses for its own caller-chosen relative paths."""
+        return await self._client.get_by_href(uri)
+
 
 def _to_raw_message(folder: str, entry) -> RawCapturedMessage:
     raw_bytes = entry.href.encode("utf-8")
