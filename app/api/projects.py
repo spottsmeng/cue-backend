@@ -15,6 +15,7 @@ from app.api.schemas import (
     MembershipOut,
     ProjectArchiveOut,
     ProjectCreate,
+    ProjectMemberOut,
     ProjectOut,
 )
 from app.core.db import get_session
@@ -176,6 +177,41 @@ async def read_my_effective_roles(
     other project-scoped GET in this router uses."""
     roles = await effective_roles(session, user.id, project.id)
     return EffectiveRoleOut(roles=sorted(roles))
+
+
+@router.get("/{project_id}/members", response_model=list[ProjectMemberOut])
+async def list_project_members(
+    project: Annotated[Project, Depends(get_project)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[ProjectMemberOut]:
+    """Frontend-enablement addition (F3, same pattern `/members/me` above
+    already used for F1) — a project-scoped member directory, distinct from
+    both `MembershipOut` (raw `user_id`, no name/email) and the org-wide,
+    org-admin-gated `GET /admin/roles`. Closes a real gap: nothing let an
+    ordinary write-role caller (e.g. naming a `DeviationResolveRequest.
+    resolution_owner`) look up a fellow member by name at all before this —
+    only an org administrator could, via `/admin/roles`, and even that
+    response carries no display_name/email to resolve to. Any project
+    member may call this (`Depends(get_project)`'s own any-membership-or-
+    delegation tier, same as `/members/me`) — this is read access to
+    "who's on my own project," not an administrative action.
+
+    No `relationship()` between Membership and User (this codebase's own
+    established style, `app/api/deviations.py`'s `_to_out` docstring: "one
+    explicit query," not an ORM join traversal) — an explicit JOIN here
+    instead, same reasoning, one query rather than N+1.
+    """
+    stmt = (
+        select(Membership.user_id, User.display_name, User.email, Membership.role)
+        .join(User, User.id == Membership.user_id)
+        .where(Membership.project_id == project.id)
+        .order_by(User.display_name, User.email)
+    )
+    rows = (await session.execute(stmt)).all()
+    return [
+        ProjectMemberOut(user_id=r.user_id, display_name=r.display_name, email=r.email, role=r.role)
+        for r in rows
+    ]
 
 
 @router.post("/{project_id}/archive", response_model=ProjectArchiveOut)

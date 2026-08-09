@@ -84,6 +84,31 @@ class EffectiveRoleOut(BaseModel):
     roles: list[MembershipRoleLiteral]
 
 
+class ProjectMemberOut(BaseModel):
+    """Backs `GET /projects/{project_id}/members` — a project-scoped member
+    directory any project member can read (same read tier as
+    `GET .../milestones`), distinct from both `MembershipOut` above (raw
+    `user_id`, no name/email — fine for an admin who already has a user in
+    hand) and the org-wide, org-admin-only `GET /admin/roles`. Exists so a
+    caller who needs to *name* a fellow member (e.g.
+    `DeviationResolveRequest.resolution_owner`) can do so without either
+    already knowing their UUID or holding org-admin access — never a
+    security boundary of its own (any member can already infer their
+    project's own roster from other project-scoped reads), only a name/
+    email join FastAPI hasn't had a response shape for. Not
+    `from_attributes`-backed: constructed from an explicit `Membership` JOIN
+    `User` query (`app/api/projects.py`'s own list_project_members), same
+    "no relationship(), one explicit select" style
+    `app/api/deviations.py`'s `_to_out` already establishes for this
+    codebase — Membership carries no ORM relationship to User to read
+    display_name/email off of directly."""
+
+    user_id: uuid.UUID
+    display_name: str | None
+    email: str
+    role: MembershipRoleLiteral
+
+
 class DelegationCreate(BaseModel):
     """FR-ADM-03: time-boxed delegation. `expires_at` is required — there is
     no un-time-boxed delegation, by design (PRD: 'time-boxed delegation for
@@ -860,12 +885,22 @@ class OntologyTermOut(BaseModel):
     """GET /projects/{id}/ontology-terms?category=X — read-only discovery
     of the valid *_code values for one ontology_terms category, resolved
     against the calling project's own effective three-tier vocabulary
-    (CUE-PRD.md §4.2.1). `id` is deliberately omitted: every *_code field
-    across this API (MilestoneCreate.type_code, CommitmentCreate.act_type,
-    DeviationCreate.class_code, ...) takes the stable `code`, never the
-    internal surrogate id — this response shape matches what a caller can
-    actually use."""
+    (CUE-PRD.md §4.2.1). Every *_code field across this API
+    (MilestoneCreate.type_code, CommitmentCreate.act_type,
+    DeviationCreate.class_code, ...) still takes the stable `code`, never
+    `id` — that part of the original design holds.
 
+    `id` was dropped from the first version of this response on exactly that
+    reasoning, but it silently broke a *different, equally real* need this
+    session (frontend F3) hit and F2 had already independently hit before
+    it: resolving an already-persisted `*_term_id` FK (MilestoneOut.
+    type_term_id, DeviationOut.class_term_id, ...) back to a human-readable
+    label. A caller can't join a stored id against a response keyed by code
+    alone. `id` is additive here (no existing caller reads a fixed key set
+    or would break on a new field), so both needs are served by the same
+    endpoint rather than adding a second one."""
+
+    id: uuid.UUID
     code: str
     label_en: str
     label_zh: str

@@ -1298,6 +1298,44 @@ action. Verified against the live API post-seed: `GET .../report/current` render
 `POST .../report/export` 409s with the expected `blocking_commitments` entry, `GET
 .../members/me` returns the right role per seeded user.
 
+### Frontend-enablement additions, round 3 (during frontend F3, 2026-08-10)
+
+Same pattern as rounds 1–2 above — two gaps `Prompt F3 — Foresight, Risks and Deviations.txt`
+found while wiring the Foresight surface against, closed on the spot rather than left as a second
+documented workaround:
+
+- **`OntologyTermOut.id`** (`app/api/schemas.py`) — the response was deliberately keyed by `code`
+  alone (every `*_code` write field takes the stable code, never the internal id), but that
+  reasoning only covers *picking* a term to write, not resolving an already-persisted `*_term_id`
+  FK (`DeviationOut.class_term_id`, `MilestoneOut.type_term_id`) back to a label. F2 hit the
+  identical gap for `type_term_id` first and worked around it by never displaying a milestone's
+  type at all (`frontend/PROGRESS.md`'s own F2 notes); F3 hit it again for `class_term_id` and
+  closed it properly instead of adding a second, independent workaround. Purely additive field
+  (`uuid.UUID`, required) — no existing caller reads a fixed key set or breaks on a new one; the
+  stale "deliberately omitted" docstring is rewritten to explain both needs. `app/api/ontology.py`
+  now passes `id=t.id` through; `sort_order` (already a required field, easy to miss reading the
+  response construction inline) is preserved unchanged.
+- **`GET /projects/{project_id}/members`** (`app/api/projects.py`, `ProjectMemberOut` in
+  `app/api/schemas.py`) — `DeviationResolveRequest.resolution_owner` (FR-DEV-03) is a required user
+  id, but nothing let an ordinary write-role member (the same tier that's actually allowed to call
+  `POST .../resolve`) look up a colleague's id by name. Only `GET /admin/roles` came close, and
+  that's org-admin-gated *and* carries no display_name/email — `MembershipOut` (raw `user_id`) and
+  `UserOut` (org-admin-only) both existed, but nothing joined them for a project-scoped, any-
+  member-readable read. `ProjectMemberOut` is that join (`Membership.user_id`/`role` × `User.
+  display_name`/`email`), one explicit query (no `relationship()` between the two tables, same "one
+  explicit select" style `app/api/deviations.py`'s `_to_out` already establishes), same any-
+  membership read tier `/members/me` uses. Not a new security boundary — every project member can
+  already infer their own project's roster from other project-scoped reads; this only adds a
+  name/email response shape for it.
+
+`tests/test_frontend_enablement_f3.py`, 4 new tests: `OntologyTermOut.id` matches the real row
+(queried directly, not just "some UUID present"); `GET .../members` returns every member with
+correct name/email/role (covering both a null and a real `display_name`); the same non-member-404
+gate `/members/me` already established; and a cross-project isolation check (`memberships` has no
+`organisation_id` column of its own — this confirms the endpoint's own `WHERE project_id = ...`
+clause, independent of RLS, never leaks a second project's members). `uv run pytest` green
+afterward: 508 passing (up from 504).
+
 ## Updating this file
 
 When a milestone completes:

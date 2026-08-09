@@ -38,6 +38,8 @@ async def read_ontology_terms(
 ) -> list[OntologyTermOut]:
     terms = await list_ontology_terms(session, project, category)
     return [
-        OntologyTermOut(code=t.code, label_en=t.label_en, label_zh=t.label_zh, sort_order=t.sort_order)
+        OntologyTermOut(
+            id=t.id, code=t.code, label_en=t.label_en, label_zh=t.label_zh, sort_order=t.sort_order
+        )
         for t in terms
     ]

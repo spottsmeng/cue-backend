@@ -37,7 +37,8 @@ from sqlalchemy import select, text
 
 from app.capture.models import Message
 from app.core.db import async_session_factory
-from app.foresight.deviation import draft_deviation
+from app.foresight.deviation import create_manual_deviation, draft_deviation
+from app.foresight.models import Notification, Risk
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.models import (
@@ -332,6 +333,74 @@ async def main() -> None:
             description_en="Vendor's quoted LED wall spec drifted from the approved render — confirm before sign-off.",
             commitment_id=pending_commitment.id,
             evidence_text="Auto-drafted from a forecast/spec-drift check (scripts/seed_dev_data.py fixture).",
+        )
+
+        # F3 enablement (Foresight): app/foresight/risk.py's own detectors
+        # (silence.py/contradiction.py/forecast.py) only ever fire from the
+        # arq worker's periodic sweeps, on real elapsed time — not something
+        # a Playwright run can wait on. Same ORM-direct pattern
+        # loadtest/seed.py already uses: insert real Risk/Notification rows
+        # for the frontend's own F3 TESTING EXPECTATION to act against
+        # (filtering, acknowledge, the 409 race, and a real collapsed
+        # notification), rather than a real sweep's timing.
+        #
+        # `base_rate=0.8` on risk_silence is fixture data for this dev
+        # script only, not a claim CLAUDE.md's Models table would forbid —
+        # it exists purely so the frontend has something real to render for
+        # the "base rate present" case; risk_forecast's own base_rate stays
+        # None (forecast-sourced Risks never get one, per Risk's own
+        # docstring), so both the present and honestly-absent cases are
+        # covered.
+        risk_silence = Risk(
+            project_id=project_id, source="silence", severity="medium", status="open",
+            finding_key=f"silence:{pending_commitment.id}",
+            commitment_id=pending_commitment.id,
+            downstream_consequence=(
+                "Golden Sound & Light has gone quiet past their own median WhatsApp reply "
+                "window on the LED wall rental — main stage delivery is at risk of slipping "
+                "past its 10-day-out commitment."
+            ),
+            base_rate=0.8,
+            detail={"vendor": "Golden Sound & Light Pte Ltd", "expected_reply_by": (now + timedelta(days=2)).isoformat()},
+        )
+        risk_forecast = Risk(
+            project_id=project_id, source="forecast", severity="critical", status="open",
+            finding_key=f"forecast:{content_load.id}",
+            milestone_id=content_load.id,
+            downstream_consequence=(
+                "Content load into screens has fallen to zero slack against the current "
+                "critical path — any further delay upstream pushes doors-open directly."
+            ),
+            base_rate=None,
+            detail={"slack_days": 0},
+        )
+        session.add_all([risk_silence, risk_forecast])
+        await session.flush()
+
+        # Collapsed notification (FR-NTF-03) to the seeded administrator —
+        # the same role e2e/global-setup.ts logs Playwright in as, so
+        # e2e/foresight.spec.ts can assert against a real, already-collapsed
+        # row rather than re-deriving collapsing client-side.
+        session.add(
+            Notification(
+                project_id=project_id, recipient_id=users_by_role["administrator"].id,
+                risk_id=risk_forecast.id, collapsed_risk_ids=[risk_silence.id], collapsed_count=2,
+                severity="critical", downstream_consequence=risk_forecast.downstream_consequence,
+                deliverable_at=now,
+            )
+        )
+
+        # A second, already-`confirmed` deviation (not auto-drafted) so F3's
+        # own resolve-deviation flow has a row to act on distinct from the
+        # auto_drafted spec_drift one above (which F3's own confirm test
+        # uses) — create_manual_deviation immediately confirms, same
+        # FR-DEV-01 "manually-entered-but-fully-real" posture as this
+        # script's own commitments/budget above.
+        await create_manual_deviation(
+            session, project=project, actor_id=users_by_role["administrator"].id,
+            class_code="delay", description_en="Rigging crew call time slipped two hours — resolved on site.",
+            milestone_id=content_load.id,
+            original_text="Rigging crew arrived two hours late; resolved by shifting the load-in window (scripts/seed_dev_data.py fixture).",
         )
 
         await session.commit()
