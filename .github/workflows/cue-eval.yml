@@ -42,7 +42,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cache Ollama model blobs
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ollama/models
           # Bump the -v1 suffix if the pulled model tag ever changes.
