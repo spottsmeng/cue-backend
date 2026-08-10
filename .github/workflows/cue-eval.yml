@@ -39,7 +39,7 @@ jobs:
     # thing that fires, not this outer job-level ceiling.
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Cache Ollama model blobs
         uses: actions/cache@v4
