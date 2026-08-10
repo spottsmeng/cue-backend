@@ -5,7 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import require_org_administrator, require_org_finance
+from app.api.deps import (
+    require_org_administrator,
+    require_org_finance,
+    require_org_finance_or_administrator,
+)
 from app.api.schemas import PartyOrganisationMappingOut, PartyOrganisationMappingSet, PartyOut, PartyTypeLiteral
 from app.core.db import get_session
 from app.identity.models import User
@@ -179,10 +183,15 @@ async def read_party(
     return await _get_party(session, user.organisation_id, party_id)
 
 
-# FR-NRM-04: a person's effective-dated vendor-company mapping — a
-# roster-management action, gated by require_org_administrator (same
-# reasoning app/api/consent.py's own admin-only surface already gives),
-# not require_org_finance's Procurement-tier read access above.
+# FR-NRM-04: a person's effective-dated vendor-company mapping. The two
+# GET operations below are require_org_finance_or_administrator-gated, not
+# require_org_administrator alone — a frontend-enablement fix (F6's own
+# gap-audit check, see that dependency's own docstring in app/api/deps.py
+# for the full reasoning): every other read on a vendor's detail page is
+# require_org_finance-gated, and this one being stricter was a real, live
+# mismatch, not a deliberate security boundary anyone had actually decided
+# on. The write below (`POST .../organisation`, a genuine roster-management
+# action) stays require_org_administrator-only, unchanged.
 organisation_router = APIRouter(prefix="/parties/{party_id}/organisation", tags=["parties"])
 
 
@@ -190,9 +199,9 @@ organisation_router = APIRouter(prefix="/parties/{party_id}/organisation", tags=
 async def read_party_organisation_history(
     party_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(require_org_administrator)],
+    user: Annotated[User, Depends(require_org_finance_or_administrator)],
 ) -> list:
-    await _get_party(session, admin.organisation_id, party_id)
+    await _get_party(session, user.organisation_id, party_id)
     return await get_organisation_history(session, party_id)
 
 
@@ -200,9 +209,9 @@ async def read_party_organisation_history(
 async def read_party_current_organisation(
     party_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    admin: Annotated[User, Depends(require_org_administrator)],
+    user: Annotated[User, Depends(require_org_finance_or_administrator)],
 ):
-    await _get_party(session, admin.organisation_id, party_id)
+    await _get_party(session, user.organisation_id, party_id)
     return await get_current_organisation(session, party_id)
 
 

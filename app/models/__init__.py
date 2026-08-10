@@ -6,7 +6,14 @@ from app.models.project import Project, Channel
 from app.models.party import Party, ChannelIdentity
 from app.models.channel_type import ChannelType
 from app.models.ontology import OntologyTerm
-from app.models.ledger import Commitment, Evidence, Deliverable, Milestone, Budget
+from app.models.ledger import (
+    Commitment,
+    CommitmentSupersessionCandidate,
+    Evidence,
+    Deliverable,
+    Milestone,
+    Budget,
+)
 from app.models.audit import AuditLog
 from app.models.governance import ConsentRecord, RetentionPolicy
 from app.twin.models import (
@@ -50,6 +57,7 @@ __all__ = [
     "ChannelType",
     "OntologyTerm",
     "Commitment",
+    "CommitmentSupersessionCandidate",
     "Evidence",
     "Deliverable",
     "Milestone",

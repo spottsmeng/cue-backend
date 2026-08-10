@@ -56,6 +56,7 @@ from app.models import (
     Party,
     Project,
 )
+from app.ledger.supersession import propose_supersession_candidates
 from app.models.vertical import Vertical
 from app.parties.organisation_mapping import set_current_organisation
 from app.parties.service import recompute_vendor_metrics
@@ -620,6 +621,95 @@ async def main() -> None:
         # now 4 commitments (was 3), median_response_time_days recomputed
         # over 4 timestamps (was 3).
         await recompute_vendor_metrics(session, vendor.id)
+        await session.commit()
+
+        # FR-LED-05 enablement: a real revision pair on `second_vendor`
+        # (Nimbus), deliberately NOT `vendor` (Golden Sound & Light) — F6's
+        # own e2e suite (e2e/vendors.spec.ts) asserts Golden Sound & Light's
+        # revision_churn/price_drift_pct stay `unavailable` with the real
+        # FR-LED-05 reason, which is only still true once this feature's own
+        # confirm action has never touched that specific vendor.
+        # `_supersedes_data_exists` (app/parties/compute.py) is an org-wide
+        # gate, not per-vendor, but each vendor's own *chain* still needs its
+        # own confirmed link to actually produce a value — using a separate
+        # vendor keeps both e2e suites' fixtures independent of run order,
+        # rather than the same shared commitment meaning two different
+        # things to two different test files.
+        #
+        # An original commitment first (Nimbus has none yet), then a real
+        # revision of it (a later message renegotiating the day-rate), then
+        # a real propose_supersession_candidates call against whatever LLM
+        # provider is configured (real Ollama in local dev per CLAUDE.md's
+        # Models table, FakeClient's own new supersession branch in CI —
+        # app/llm/client.py — so this fixture produces a genuine candidate
+        # either way, not just locally) so Living WIP's own supersession
+        # review panel has a real, pending item to act on. Left `pending`
+        # deliberately — confirming it is a real human-in-the-loop action,
+        # the point of the feature, not something this fixture should
+        # short-circuit by pre-confirming it.
+        staffing_original = Commitment(
+            project_id=project_id, party_id=second_vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="committed",
+            deliverable_en="Event day staffing crew",
+            due_at=now + timedelta(days=14), amount=4200.00, currency="SGD",
+            confidence=0.92, field_confidence={"amount": 0.92},
+            verification_state="human_verified",
+            verified_by=users_by_role["project_manager"].id, verified_at=now,
+        )
+        session.add(staffing_original)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=staffing_original.id, channel="whatsapp", sent_at=now,
+                language="en", original_text="Confirmed, event day staffing crew at SGD 4,200 total.",
+            )
+        )
+        await session.flush()
+        # A real, separate commit here — not just a flush — same reasoning
+        # the two recompute_vendor_metrics calls above already needed:
+        # `created_at` is `server_default=func.now()`, fixed for the
+        # lifetime of one Postgres transaction, so the revision commitment
+        # below would otherwise get the *identical* created_at as this one,
+        # and find_candidate_priors's own "recorded strictly before" filter
+        # (app/ledger/supersession.py) would then find zero candidates —
+        # confirmed the hard way, this fixture initially produced no
+        # candidate at all until this commit was added.
+        await session.commit()
+
+        staffing_revision = Commitment(
+            project_id=project_id, party_id=second_vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="committed",
+            deliverable_en="Event day staffing crew",
+            due_at=now + timedelta(days=14), amount=5100.00, currency="SGD",
+            confidence=0.9, field_confidence={"amount": 0.9},
+            # human_verified, not pending_verification — this fixture's own
+            # test (e2e/supersession.spec.ts) never touches verification,
+            # and e2e/living-wip.spec.ts's own already-established test
+            # asserts zero "Pending verification" badges remain in Budget
+            # Summary after verifying its own one known commitment; a
+            # second, never-verified pending commitment elsewhere in the
+            # same shared seeded project would silently break that
+            # unrelated assertion — caught by actually running the full
+            # suite, not assumed.
+            verification_state="human_verified",
+            verified_by=users_by_role["project_manager"].id, verified_at=now,
+        )
+        session.add(staffing_revision)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=staffing_revision.id, channel="whatsapp",
+                sent_at=now + timedelta(hours=6), language="en",
+                original_text=(
+                    "We need to add two more crew for the extended load-out window — "
+                    "revised total is SGD 5,100."
+                ),
+            )
+        )
+        await session.flush()
+        await propose_supersession_candidates(
+            session, staffing_revision, hint="price_changed", organisation_id=org_id,
+        )
 
         await session.commit()
 

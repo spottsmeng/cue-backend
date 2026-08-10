@@ -13,6 +13,7 @@ from app.ledger.schema import (
     load_extraction_json_schema,
     load_extraction_prompt_template,
 )
+from app.ledger.supersession import propose_supersession_candidates
 from app.llm.client import ModelClient
 from app.llm.cost import record_llm_usage
 from app.llm.factory import get_client
@@ -188,6 +189,22 @@ async def extract_case(
             actor_id=None,
             to_state=commitment.state,
             evidence_id=evidence.id,
+        )
+
+        # FR-LED-05: propose (never apply) a supersession candidate against
+        # any prior commitment for this same vendor+deliverable — see
+        # app/ledger/supersession.py's own module docstring for why this is
+        # AI-proposed/human-confirmed, not automatic. `item.price_changed`
+        # is cue-eval/schema.json's own tuned extraction-time signal
+        # (ExtractedCommitment's own field) — it existed before this
+        # session but nothing downstream ever consumed it; threading it
+        # through here as a hint doesn't touch the tuned extraction prompt
+        # or schema at all, just uses output that was already being
+        # produced and discarded.
+        await propose_supersession_candidates(
+            session, commitment,
+            hint="price_changed" if item.price_changed else None,
+            organisation_id=organisation_id,
         )
         created.append(commitment)
 

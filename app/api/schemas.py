@@ -454,6 +454,31 @@ class PaymentStatusUpdate(BaseModel):
     payment_status: PaymentStatusLiteral
 
 
+CommitmentSupersessionCandidateStatusLiteral = Literal["pending", "confirmed", "rejected"]
+
+
+class CommitmentSupersessionCandidateOut(BaseModel):
+    """FR-LED-05: an AI-proposed, not-yet-applied candidate link between two
+    commitments (app/ledger/supersession.py) — plain ids only, no
+    denormalised deliverable/amount text, same "resolve against an already-
+    fetched list client-side" discipline this API holds everywhere else
+    (OntologyTermOut, ProjectMemberOut) rather than duplicating display data
+    that would drift from the commitments it describes."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    commitment_id: uuid.UUID
+    supersedes_commitment_id: uuid.UUID
+    reasoning: str
+    status: CommitmentSupersessionCandidateStatusLiteral
+    reviewed_by: uuid.UUID | None
+    reviewed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
 class ChannelOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

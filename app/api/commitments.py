@@ -23,6 +23,7 @@ from app.identity.service import FINANCE_ROLES, WRITE_ROLES
 from app.ledger.audit import record_audit_event
 from app.ledger.extractor import _get_commitment_act_term
 from app.ledger.lifecycle import InvalidTransition, validate_transition
+from app.ledger.supersession import propose_supersession_candidates
 from app.models import Commitment, Deliverable, Evidence, Party, Project
 from app.parties.service import recompute_vendor_metrics
 from app.twin.service import recompute_on_commitment_transition
@@ -235,6 +236,13 @@ async def create_commitment(
         actor_id=actor_id,
         to_state=commitment.state,
         evidence_id=evidence.id,
+    )
+    # FR-LED-05: same propose-only-never-apply candidate check
+    # extract_case's own extraction path runs — a manually-entered revision
+    # (a PM logging a renegotiated price by hand) deserves the same
+    # candidate detection an extracted one gets, not a second-class path.
+    await propose_supersession_candidates(
+        session, commitment, organisation_id=project.organisation_id,
     )
     await session.commit()
     return await _to_out(session, commitment)

@@ -136,6 +136,64 @@ class Commitment(Base, UUIDPk, Timestamped):
     supersedes: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(UUID(as_uuid=True)), default=list)
 
 
+CommitmentSupersessionCandidateStatus = Enum(
+    "pending", "confirmed", "rejected", name="commitment_supersession_candidate_status"
+)
+
+
+class CommitmentSupersessionCandidate(Base, UUIDPk, Timestamped):
+    """FR-LED-05: an AI-*proposed* candidate link — "commitment does this
+    appear to revise commitment that" — never applied to `Commitment.
+    supersedes` until a human confirms it (app/ledger/supersession.py owns
+    the propose/confirm/reject lifecycle). Same auto-drafted-then-human-
+    confirmed shape app/foresight/models.py's `Deviation` already
+    established (`status`: auto_drafted -> confirmed) and app/writeback/
+    models.py's `OutboundMessage` established a third time (draft ->
+    authorised -> sent) — reused here rather than reinvented, because
+    CLAUDE.md's "no commitment without evidence... verified in code, not
+    trusted" extends naturally to "no supersession link without a human
+    confirming it, verified in code": the model proposes a relationship
+    between two *existing*, already-evidenced commitments, a human decides
+    whether it's real, and only a `confirmed` row ever mutates
+    `Commitment.supersedes`.
+
+    `commitment_id` is the newer commitment (the one that may be a
+    revision); `supersedes_commitment_id` is the older one it may revise.
+    Only ever written by app/ledger/supersession.py's `propose_
+    supersession_candidates` when the model's own judgment is "yes, this
+    looks like a revision" — no row is written for a "no" verdict, same
+    "only surface a real finding" posture app/foresight/risk.py's own
+    dedup-on-write discipline establishes for detector output elsewhere in
+    this codebase.
+
+    No `organisation_id` column, same direct-`project_id`-only shape
+    `Deviation`/`Risk`/`AuditLog` already use (RLS via a join through
+    `projects`, not a denormalised org column) — this is a Ledger-scoped
+    concept about two commitments in one project, not an org-wide one the
+    way `VendorMetric` genuinely is.
+    """
+
+    __tablename__ = "commitment_supersession_candidates"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("projects.id"), index=True, comment="RLS scope"
+    )
+    commitment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("commitments.id"), index=True,
+        comment="the newer commitment — the one that may be a revision",
+    )
+    supersedes_commitment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("commitments.id"), index=True,
+        comment="the older commitment it may revise",
+    )
+    reasoning: Mapped[str] = mapped_column(comment="the model's own stated reasoning, verbatim")
+    status: Mapped[str] = mapped_column(CommitmentSupersessionCandidateStatus, default="pending")
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), default=None
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(TZDateTime, default=None)
+
+
 class Evidence(Base, UUIDPk):
     """PRD §4.3. Belongs to exactly one of {commitment, budget, document
     version, spec claim, deviation} — enforced by the CHECK constraint below,

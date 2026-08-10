@@ -11,6 +11,7 @@ from app.api.budget import router as budget_router
 from app.api.channel_types import router as channel_types_router
 from app.api.channels import router as channels_router
 from app.api.commitments import router as commitments_router
+from app.api.supersession import router as supersession_router
 from app.api.consent import router as consent_router
 from app.api.deviations import router as deviations_router
 from app.api.documents import router as documents_router
@@ -46,6 +47,7 @@ app.include_router(auth_router)
 app.include_router(ontology_router)
 app.include_router(parties_list_router)
 app.include_router(projects_router)
+app.include_router(supersession_router)
 app.include_router(commitments_router)
 app.include_router(milestones_router)
 app.include_router(twin_router)

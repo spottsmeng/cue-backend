@@ -148,6 +148,10 @@ class FakeClient:
     _EXCERPT_BLOCK_RE = re.compile(
         r"\[([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\] \([a-z_]+\): (.+)"
     )
+    # app/ledger/supersession.py's own _PROMPT_TEMPLATE: two fixed lines,
+    # "Older commitment ...: amount X, due ..." then "Newer commitment
+    # ...: amount Y, due ...", in that order.
+    _SUPERSESSION_AMOUNT_RE = re.compile(r"amount ([^,]+),")
     _WORD_RE = re.compile(r"[a-z0-9]+")
     # Words too short/common to count as a real topical overlap signal — a
     # bare stopword match ("the", "for") would make almost any two English
@@ -172,6 +176,8 @@ class FakeClient:
             response = self._fake_ask_answer(prompt)
         elif required == {"question"} and set(schema.get("properties", {})) == {"question"}:
             response = {"question": "Can you confirm this is still on track?"}
+        elif required == {"supersedes", "reasoning"}:
+            response = self._fake_supersession(prompt)
         else:
             response = _synthesize_from_schema(schema)
         usage = LLMUsage(provider="fake", model=self.model, tokens_in=0, tokens_out=0, estimated_cost_usd=0.0)
@@ -201,6 +207,34 @@ class FakeClient:
             "has_support": True,
             "answer": f"[fake model] grounded in {len(relevant_ids)} retrieved source excerpt(s).",
             "citation_source_ids": relevant_ids,
+        }
+
+    def _fake_supersession(self, prompt: str) -> dict:
+        """FR-LED-05's candidate-proposal schema (app/ledger/supersession.py).
+        An honest, if simple, judgment — not an unconditional "yes" — same
+        discipline `_fake_ask_answer` above already establishes for the same
+        reason: the real caller (`find_candidate_priors`) only ever asks
+        this question about two commitments that already share a party and
+        an exact deliverable name, so an unconditional "yes" here would
+        never actually exercise this feature's own "reject, these are
+        unrelated" path in a CI-driven e2e spec. The two amounts are parsed
+        straight from the prompt's own fixed template (both call sites
+        format it identically); genuinely differing means "looks like a
+        revision," identical or unparseable means "no signal either way,"
+        the same fallback-to-false posture `_synthesize_value` already takes
+        for an unrecognised boolean field.
+        """
+        amounts = self._SUPERSESSION_AMOUNT_RE.findall(prompt)
+        if len(amounts) == 2 and amounts[0] != amounts[1]:
+            return {
+                "supersedes": True,
+                "reasoning": (
+                    f"[fake model] same deliverable, amount changed from {amounts[0]} to {amounts[1]}."
+                ),
+            }
+        return {
+            "supersedes": False,
+            "reasoning": "[fake model] no material difference found between the two commitments.",
         }
 
     def _significant_words(self, text: str) -> set[str]:

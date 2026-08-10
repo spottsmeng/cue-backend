@@ -187,3 +187,47 @@ async def require_org_finance(
             detail="finance/procurement role required on at least one project in this organisation",
         )
     return user
+
+
+async def require_org_finance_or_administrator(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """The *read* tier for `GET /parties/{id}/organisation` (and `.../current`)
+    — union of require_org_finance and require_org_administrator's own role
+    sets. app/api/parties.py's organisation_router originally gated every
+    operation there (including these two reads) on require_org_administrator
+    alone, the same tier as the write (`POST .../organisation`, a genuine
+    FR-NRM-04 roster-management action). That was a real, live gate mismatch
+    with the rest of the Vendor Reliability Graph surface, which is
+    require_org_finance-gated throughout (app/api/parties.py's own reliability
+    endpoints, list_parties, and now read_party) — a Finance/Producer user
+    could see every other section of a vendor's detail page but 403 on this
+    one, found and closed during frontend F6's own gap-audit check.
+
+    The write stays require_org_administrator-only, unchanged — FR-NRM-04's
+    write is a roster-management action (same reasoning app/api/consent.py's
+    own admin-only surface already gives), genuinely more sensitive than
+    reading who currently represents a vendor, which a Finance/Producer user
+    already implicitly has access to the commercial context for via this
+    same vendor's reliability metrics.
+    """
+    is_permitted = (
+        await session.execute(
+            select(Membership.id)
+            .where(
+                Membership.user_id == user.id,
+                Membership.role.in_({*FINANCE_ROLES, "administrator"}),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if is_permitted is None:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "finance/procurement or administrator role required on at least one "
+                "project in this organisation"
+            ),
+        )
+    return user

@@ -12,6 +12,7 @@ import pytest
 from app.ask.answer import _ANSWER_SCHEMA
 from app.ask.embeddings import FakeEmbeddingClient
 from app.ask.intent import _INTENT_SCHEMA, IntentClassification
+from app.ledger.supersession import _SUPERSESSION_JSON_SCHEMA, _SupersessionJudgment
 from app.llm.client import FakeClient
 from app.writeback.compose import ComposedDraft
 from app.writeback.schema import COMPOSE_DRAFT_JSON_SCHEMA
@@ -133,6 +134,44 @@ async def test_fake_client_unknown_schema_synthesizes_a_valid_stub_instead_of_cr
     parsed = json.loads(raw)
 
     assert parsed == {"verdict": False, "note": None, "tags": []}
+
+
+@pytest.mark.asyncio
+async def test_fake_client_supersession_schema_detects_a_differing_amount():
+    """FR-LED-05: without this branch, an e2e/CI run (real Ollama never
+    used there — see FakeClient's own module docstring) would silently
+    produce zero supersession candidates from the seed script's own real
+    revision fixture, since the generic schema-synthesis fallback returns
+    `False` for any unrecognised boolean field."""
+    fake = FakeClient()
+    prompt = (
+        'Older commitment (recorded first): "LED wall rental", amount 18500.0 SGD, due 2026-08-20\n'
+        'Newer commitment (recorded later): "LED wall rental", amount 21000.0 SGD, due 2026-08-20\n'
+        "\nDoes the newer commitment revise/replace the older one?"
+    )
+
+    raw, usage = await fake.complete(prompt, _SUPERSESSION_JSON_SCHEMA)
+    parsed = _SupersessionJudgment(**json.loads(raw))
+
+    assert parsed.supersedes is True
+    assert "18500.0 SGD" in parsed.reasoning
+    assert "21000.0 SGD" in parsed.reasoning
+    assert usage.provider == "fake"
+
+
+@pytest.mark.asyncio
+async def test_fake_client_supersession_schema_leaves_identical_amounts_alone():
+    fake = FakeClient()
+    prompt = (
+        'Older commitment (recorded first): "Staffing — day crew", amount not specified, due 2026-08-20\n'
+        'Newer commitment (recorded later): "Staffing — day crew", amount not specified, due 2026-08-21\n'
+        "\nDoes the newer commitment revise/replace the older one?"
+    )
+
+    raw, _ = await fake.complete(prompt, _SUPERSESSION_JSON_SCHEMA)
+    parsed = _SupersessionJudgment(**json.loads(raw))
+
+    assert parsed.supersedes is False
 
 
 @pytest.mark.asyncio

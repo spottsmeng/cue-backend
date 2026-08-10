@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+import uuid
+
+from app.identity.config import get_identity_settings
+from app.identity.models import Membership, User
 from app.models import Party
 from app.parties.organisation_mapping import (
     OrganisationMappingError,
@@ -15,11 +19,28 @@ from app.parties.organisation_mapping import (
     set_current_organisation,
 )
 from main import app
-from tests.conftest import set_org_context
+from tests.conftest import mint_token, set_org_context
 
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+async def _member(app_session, org_id, project_id, role, granted_by):
+    """Mirrors tests/test_parties_list_api.py's own helper of the same
+    name — a real Membership row, not a stub, so the real require_org_*
+    dependency chain is exercised end to end."""
+    await set_org_context(app_session, org_id)
+    subject = f"{role}-{uuid.uuid4()}"
+    user = User(
+        organisation_id=org_id, issuer=get_identity_settings().local_issuer,
+        external_subject=subject, email=f"{subject}@example.test",
+    )
+    app_session.add(user)
+    await app_session.flush()
+    app_session.add(Membership(user_id=user.id, project_id=project_id, role=role, granted_by=granted_by))
+    await app_session.commit()
+    return user, mint_token(org_id, subject=subject, email=user.email)
 
 
 @pytest.mark.asyncio
@@ -162,3 +183,85 @@ async def test_organisation_api_round_trip(authed_org_and_project):
         history = await client.get(f"/parties/{person_id}/organisation", headers=_headers(admin_token))
         assert history.status_code == 200
         assert len(history.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_finance_only_user_can_read_organisation_mapping(app_session, authed_org_and_project):
+    """Frontend-enablement fix (F6's own gap-audit check): the two GET
+    operations are require_org_finance_or_administrator-gated now, not
+    require_org_administrator alone — a Finance/Producer user (who can
+    already see everything else on a vendor's detail page) must not 403
+    here specifically. The write stays admin-only, asserted separately
+    below."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    _finance, finance_token = await _member(app_session, org_id, project_id, "finance", admin.id)
+
+    from app.core.db import async_session_factory
+
+    async with async_session_factory() as session:
+        await set_org_context(session, org_id)
+        person = Party(organisation_id=org_id, display_name="Finance-readable Contact", type="person")
+        vendor = Party(organisation_id=org_id, display_name="Finance-readable Vendor", type="vendor_org")
+        session.add_all([person, vendor])
+        await session.commit()
+        person_id, vendor_id = person.id, vendor.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # The write is still administrator-only — a finance-only user 403s here.
+        create = await client.post(
+            f"/parties/{person_id}/organisation",
+            headers=_headers(finance_token),
+            json={"organisation_party_id": str(vendor_id)},
+        )
+        assert create.status_code == 403, create.text
+
+        # Set the mapping as admin, then confirm finance can read both GETs.
+        create_as_admin = await client.post(
+            f"/parties/{person_id}/organisation",
+            headers=_headers(admin_token),
+            json={"organisation_party_id": str(vendor_id)},
+        )
+        assert create_as_admin.status_code == 201, create_as_admin.text
+
+        current = await client.get(
+            f"/parties/{person_id}/organisation/current", headers=_headers(finance_token)
+        )
+        assert current.status_code == 200, current.text
+        assert current.json()["organisation_party_id"] == str(vendor_id)
+
+        history = await client.get(
+            f"/parties/{person_id}/organisation", headers=_headers(finance_token)
+        )
+        assert history.status_code == 200, history.text
+        assert len(history.json()) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_project_manager_only_user_is_still_refused_read_access(
+    app_session, authed_org_and_project
+):
+    """Neither finance/producer nor administrator — still 403, same as
+    before this fix. The gate was loosened to include Finance/Producer, not
+    opened to every role."""
+    org_id, project_id, admin, _admin_token = authed_org_and_project
+    _pm, pm_token = await _member(app_session, org_id, project_id, "project_manager", admin.id)
+
+    from app.core.db import async_session_factory
+
+    async with async_session_factory() as session:
+        await set_org_context(session, org_id)
+        person = Party(organisation_id=org_id, display_name="Still-Gated Contact", type="person")
+        session.add(person)
+        await session.commit()
+        person_id = person.id
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        history = await client.get(f"/parties/{person_id}/organisation", headers=_headers(pm_token))
+        assert history.status_code == 403, history.text
+
+        current = await client.get(
+            f"/parties/{person_id}/organisation/current", headers=_headers(pm_token)
+        )
+        assert current.status_code == 403, current.text

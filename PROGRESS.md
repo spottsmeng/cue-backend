@@ -1525,6 +1525,110 @@ a checkout without this round's changes. Worth a future session exporting `CUE_L
 for both processes at once (or teaching `global-setup.ts` to pass it through explicitly) rather than
 relying on ambient shell state neither process is guaranteed to share.
 
+### FR-LED-05: commitment supersession detection, AI-proposed/human-confirmed (post-F6, 2026-08-10)
+
+Not a numbered milestone — a real feature addition made on direct request while F6 (Vendor
+Reliability Graph) was already Done, to close the one gap in that surface a Procurement user would
+actually notice live: `revision_churn`/`price_drift_pct` showing `available=False` for every vendor,
+forever, because `Commitment.supersedes` (FR-LED-05) had never been populated by any path in this
+build — confirmed by grep before this session, the same discipline every other gap-closing round in
+this file already follows.
+
+**Design decision, made explicitly rather than assumed**: not fully automatic linking (an unreviewed
+edit to a *different* commitment's own `supersedes` array is exactly the kind of thing CLAUDE.md's
+"no commitment without evidence... verified in code, not trusted" already argues against), and not
+purely manual either (nobody reliably notices and links a revision by hand). AI-proposes, human-
+confirms — the same shape already proven three times elsewhere in this codebase (`Deviation`'s
+`auto_drafted -> confirmed`, `OutboundMessage`'s `draft -> authorised -> sent`, `Commitment`'s own
+`pending_verification -> human_verified`), reused rather than reinvented.
+
+**New table, `commitment_supersession_candidates`** (`app/models/ledger.py`,
+`CommitmentSupersessionCandidate`) — `commitment_id` (the newer commitment), `supersedes_commitment_id`
+(the older one it may revise), `reasoning` (the model's own stated judgment, verbatim), `status`
+(`pending`/`confirmed`/`rejected`), `reviewed_by`/`reviewed_at`. Direct-`project_id`-column RLS, same
+shape `risks`/`deviations`/`notifications` already use (migration `f4b7c2a91e3d`, hand-authored
+matching this project's own established migration style, not raw `alembic revision --autogenerate`
+output — the autogenerate pass pulled in ~500 lines of unrelated pre-existing schema drift and was
+discarded).
+
+**`app/ledger/supersession.py`** — `find_candidate_priors` (plain SQL: same vendor, same
+case-insensitive `deliverable_en`, recorded strictly before, capped at 3 most recent — cheap, and the
+common case of a genuinely new commitment returns nothing without ever reaching the model at all);
+`propose_supersession_candidates` (one `get_client("reasoning")` call per candidate found, only ever
+writes a row for a "yes" verdict, same "only surface a real finding" posture `app/foresight/risk.py`'s
+detectors already hold); `confirm_supersession_candidate` (the only path that ever mutates
+`Commitment.supersedes` — reassigns the whole list, never an in-place `.append`, so SQLAlchemy's
+change tracking actually fires — and triggers a fresh `recompute_vendor_metrics` immediately, so
+`revision_churn`/`price_drift_pct` reflect the new link the instant a human confirms it);
+`reject_supersession_candidate` (status only, no `Commitment` change, kept as its own honest record
+rather than deleted).
+
+**Hooked into both places a new `Commitment` can ever be created** — `app/ledger/extractor.py`'s
+`extract_case` (passing `cue-eval/schema.json`'s own `price_changed` field through as a hint; that
+field already existed, tuned, in the extraction schema, but nothing downstream had ever consumed it
+before this — confirmed by grep, not touched itself, so this closes a real gap without touching the
+tuned extraction prompt CLAUDE.md's own discipline protects) and `app/api/commitments.py`'s manual
+`create_commitment` (a PM logging a renegotiated price by hand deserves the same detection an
+extracted one gets).
+
+**New router, `app/api/supersession.py`** — `GET/POST .../commitments/supersession-candidates`,
+`WRITE_ROLES`-gated confirm/reject, `409` on double-confirm/reject rather than a silent no-op. **Real
+routing bug caught by the test suite, not assumed**: registering this router *after*
+`commitments_router` in `main.py` let `GET .../commitments/{commitment_id}`'s wildcard path segment
+swallow `.../commitments/supersession-candidates` first (a literal string matched the `{commitment_id}`
+UUID param position and 422'd) — the identical class of bug `.../documents/search` vs.
+`.../documents/{document_id}` already hit and fixed the same way (round 5's own notes); fixed by
+registering the more specific router first, same precedent.
+
+**`app/llm/client.py`'s `FakeClient` gained a fourth named schema branch** — without it, CI (which
+never runs real Ollama, per the "Architecture correction" entry above) would synthesize
+`supersedes: false` for this new schema by default (the generic fallback returns `False` for any
+unrecognised boolean field), silently producing zero candidates from the seed script's own real
+revision fixture in every CI run. `_fake_supersession` makes an honest amount-comparison judgment
+(parses both commitments' amounts straight from the prompt's own fixed template; genuinely differing
+means "yes," identical means "no") — same "an honest judgment, not an unconditional yes" discipline
+the Ask answer-generation branch already established, for the identical reason: an always-`true` fake
+would never exercise this feature's own reject path in CI.
+
+**Dev-seed extension, on `second_vendor` ("Nimbus Event Staffing Pte Ltd"), deliberately not
+`vendor` ("Golden Sound & Light Pte Ltd")** — a real cross-suite interaction the frontend's own e2e
+run caught: both spec files (`e2e/vendors.spec.ts`, `e2e/supersession.spec.ts`) share one seeded org
+for a whole Playwright invocation, and confirming a candidate on the same vendor F6's own suite
+asserts stays `revision_churn`/`price_drift_pct`-`unavailable` would make that earlier, independently-
+correct assertion false depending on run order. Separate vendors keep both fixtures independent
+regardless of which file Playwright happens to run first. **A second real bug this same verification
+pass caught**: the original and revision commitments were both inserted in the same, still-uncommitted
+transaction — `created_at` is `server_default=func.now()`, fixed for the lifetime of one Postgres
+transaction, so `find_candidate_priors`'s own "recorded strictly before" filter found zero candidates
+until a real intermediate `session.commit()` was added between them (same class of bug the two
+`recompute_vendor_metrics` calls earlier in this same script already had to work around, for the
+identical reason). **A third**: the revision commitment's `verification_state` was originally
+`pending_verification`, silently breaking `e2e/living-wip.spec.ts`'s own already-established assertion
+("zero 'Pending verification' badges remain after verifying the one known commitment") once a second,
+never-verified pending commitment existed anywhere else in the same shared seeded project — caught by
+running the *full* suite, not just this feature's own two new specs, and fixed by seeding it
+`human_verified` instead (nothing about this fixture's own test needs it pending).
+
+**Frontend-enablement fix closed in the same pass, not left as documented — `GET /parties/{id}/
+organisation`(`/current`) were `require_org_administrator`-only**, a real, live gate mismatch F6's own
+gap-audit had found and documented but not fixed (a Finance/Producer user could see every other
+section of a vendor's detail page and still 403 on this one). New `require_org_finance_or_administrator`
+dependency (`app/api/deps.py`) — union of both role sets — on the two GET operations; the write
+(`POST .../organisation`, a genuine FR-NRM-04 roster-management action) stays administrator-only,
+unchanged. `tests/test_party_organisation_mapping.py`, 2 new tests (a finance-only user can now read
+both GETs but still 403s on the write; a project_manager-only user — neither tier — still 403s on
+reads too, confirming the gate was widened, not opened to everyone).
+
+Full `uv run pytest` green throughout this work: 544 passing (up from 528 after F6's own round 6).
+Verified against the real running backend at every step, not assumed — `curl`, not just tests: a
+freshly seeded organisation's real Ollama call produced a correctly-reasoned candidate
+("...both commitments have identical descriptions... differ in amount (from 18500.0 SGD to 21000.0
+SGD)... strongly indicates a revision"), confirming it made `revision_churn`/`price_drift_pct` flip
+from `available=False` to real computed values (`price_drift_pct: 13.51%`, matching
+`(21000-18500)/18500*100` exactly) in the same live session. `e2e/supersession.spec.ts` (frontend)
+covers the same flow through the real UI, both with real Ollama and with `FakeClient`'s new branch
+(CI parity, `CUE_LLM_*_PROVIDER=fake`) — see frontend/PROGRESS.md's own notes for the UI side.
+
 ## Updating this file
 
 When a milestone completes:
