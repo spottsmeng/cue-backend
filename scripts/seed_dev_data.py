@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import select, text
 
+from app.ask.embed_worker import run_embedding_sweep
 from app.capture.models import Message
 from app.core.db import async_session_factory
 from app.documents.models import Document, DocumentVersion, SpecClaim
@@ -480,6 +481,22 @@ async def main() -> None:
         )
 
         await session.commit()
+
+    # F5 enablement (Ask): app/ask/embed_worker.py's own sweep is the only
+    # thing that ever populates RetrievalChunk (Evidence/AuditLog text) or
+    # DocumentVersion.embedding — normally an arq cron tick on real elapsed
+    # time, the same "not something Playwright can wait on" gap F3's own
+    # risk_silence/risk_forecast fixtures and F4's own contradicts fixture
+    # already work around. `run_embedding_sweep` is directly callable with
+    # no running worker (its own docstring), so it's invoked once here,
+    # after the commit above, rather than waiting on a real cron tick —
+    # every Evidence/AuditLog/DocumentVersion row seeded above is real
+    # retrievable text immediately after this script exits. Document
+    # lexical search itself doesn't need this (DocumentVersion.search_vector
+    # is a GENERATED column, live the instant a version is inserted) but
+    # semantic search and every Evidence/AuditLog citation do.
+    embedded = await run_embedding_sweep()
+    print(f"embedded {embedded} rows for retrieval (Ask)")
 
     print(f"organisation_id: {org_id}")
     print(f"project_id:      {project_id}")

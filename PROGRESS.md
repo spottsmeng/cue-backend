@@ -1373,6 +1373,56 @@ real MinIO object on purpose — this fixture pair only backs the spec-claims co
 `e2e/documents.spec.ts`'s own upload/version/approve test uploads a fresh document through the real
 UI instead, exercising the real `StorageBackend` for that path.
 
+### Frontend-enablement addition, round 5 (during frontend F5, 2026-08-10)
+
+One gap `Prompt F5 — Ask and Successor Brief.txt` found while wiring citation routing — same
+"close it on the spot, document it" pattern as rounds 1–4:
+
+- **`GET /projects/{project_id}/documents/versions/{version_id}`** (`app/api/documents.py`, no new
+  response schema — `DocumentVersionOut` already carries `document_id`). Ask's `Citation`
+  (`app/ask/schema.py`) with `source_type == "document_version"` only ever carries the
+  DocumentVersion's own id — confirmed by reading `app/ask/answer.py`'s `_resolve_citation`
+  directly, not assumed. Every other version route in this router is nested under
+  `/{document_id}/versions/{version_id}` and needs both ids, which the citation doesn't have — the
+  same "an id surfaced with no paired way to resolve it" gap shape frontend/CLAUDE.md's own
+  gap-audit section names (Class A), just for a different field than round 4's
+  `SpecClaimResolvedOut`. Registered ahead of the router's existing `/{document_id}` route (same
+  `/search`-before-`/{document_id}` precedent already in this file) so `"versions"` is never
+  mistaken for a `document_id` path segment.
+
+`tests/test_frontend_enablement_f5.py`, 3 new tests: a version resolves by its own id alone,
+carrying its real parent `document_id`; an unknown version id 404s; a real version id under a
+project it doesn't belong to 404s (same project-scoping shape round 4's spec-claim resolver test
+asserts). `uv run pytest` green afterward: 513 passing (up from 510).
+
+**One gap found and deliberately left open, not closed** — `audit_log`-typed citations have no
+routing target at all, not just no actor name (F5's own prompt had already flagged the actor-name
+half as a known, worse-than-Class-A gap: `Citation.label` is always null for this type,
+`AuditLog.actor_id` has no resolver anywhere). Reading `_resolve_citation` further while wiring the
+frontend surfaced a second half of the same gap: the `Citation` for an `audit_log` hit carries only
+the `AuditLog` row's own id — never `commitment_id`, which the row does have (`app/models/audit.py`:
+`NOT NULL`) — and no endpoint resolves one to the other, so there is no way to route to the
+commitment the log entry is even about. Would need a small resolver in the same shape as the
+document_version one above (`GET .../audit-log/{audit_log_id}` returning just enough to route,
+project-membership-gated the same way Ask itself is). Not added this session — nothing in F5's own
+WHAT TO BUILD specifically depended on it, and its own NON-OBVIOUS note already anticipated leaving
+this one as a named gap rather than routed around. Documented in frontend/PROGRESS.md's F5 notes;
+worth closing whenever a later session actually needs to open an audit_log citation, not before.
+
+**`scripts/seed_dev_data.py` extended once more**, same file: ends with a real call to
+`app/ask/embed_worker.py`'s `run_embedding_sweep()` — the only thing that ever populates
+`RetrievalChunk` (Evidence/AuditLog text embeddings) or `DocumentVersion.embedding`, normally an arq
+cron tick on real elapsed time, the same "not something Playwright can wait on" gap rounds 3/4's own
+fixture work already routes around, applied here to Ask's retrieval index instead of a
+foresight/documents fixture. `run_embedding_sweep` is directly callable with no running worker (its
+own docstring) so no new machinery was needed, just the one call. Confirmed working end-to-end this
+session (373 rows embedded from one seed run) — but only after also pulling `bge-m3` into this
+sandbox's local Ollama, which hadn't been pulled yet (`app/ask/config.py`'s `EmbeddingSettings`
+default, matching `DocumentVersion.embedding`/`RetrievalChunk.embedding`'s hardcoded `Vector(1024)`
+column width; `nomic-embed-text`, already present locally, is 768-dim and isn't a drop-in
+substitute). Environment state, not a code change — noted here in case a later fresh sandbox needs
+the same one-time pull.
+
 ## Updating this file
 
 When a milestone completes:

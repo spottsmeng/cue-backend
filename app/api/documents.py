@@ -190,6 +190,36 @@ async def read_spec_claim(
     )
 
 
+@router.get("/versions/{version_id}", response_model=DocumentVersionOut)
+async def read_version(
+    version_id: uuid.UUID,
+    project: Annotated[Project, Depends(get_project)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+    storage: Annotated[StorageBackend, Depends(get_storage_backend)],
+) -> DocumentVersionOut:
+    """Frontend-enablement addition (F5, Ask citation routing): a
+    `document_version`-typed Citation (app/ask/schema.py) only ever carries
+    the DocumentVersion's own id, never its parent document_id — every other
+    version route needs both ids in the URL already. `DocumentVersionOut`
+    already carries `document_id` itself, so this is a plain lookup by
+    version id alone, no new response shape needed (contrast with the
+    `/spec-claims/{spec_claim_id}` resolver just above, which did need one).
+    Registered ahead of `/{document_id}` for the same reason `/search` and
+    `/spec-claims/{spec_claim_id}` are — "versions" must never be parsed as a
+    document_id path segment."""
+    version = (
+        await session.execute(
+            select(DocumentVersion)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(DocumentVersion.id == version_id, Document.project_id == project.id)
+        )
+    ).scalar_one_or_none()
+    if version is None:
+        raise HTTPException(status_code=404, detail="document version not found")
+    document = await _get_document(session, project, version.document_id)
+    return _to_version_out(version, document, storage)
+
+
 @router.get("/{document_id}", response_model=DocumentOut)
 async def read_document(
     document_id: uuid.UUID,
