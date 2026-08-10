@@ -19,6 +19,25 @@ jobs:
       # (see .env.example) — not a secret, just the ephemeral CI Postgres
       # container's password, torn down at the end of the job.
       CUE_APP_DB_PASSWORD: cue_app
+      # This project's own dev strategy (CLAUDE.md's Models table) scopes
+      # real Ollama to the developer's own local machine only — dev, test,
+      # demo — never a remote, GPU-less CI runner (the "Architecture
+      # correction" already applied to frontend/.github/workflows/ci.yml's
+      # own Playwright job, post-F5). Missing here until now: app/llm/
+      # config.py's LLMSettings defaults both provider roles to "ollama"
+      # when these are unset, so any test exercising a real LLM call (e.g.
+      # FR-LED-05's propose_supersession_candidates, wired into
+      # create_commitment) silently depended on a real Ollama this runner
+      # never has — found failing in CI with `httpx.ConnectError: All
+      # connection attempts failed` (tests/test_parties_reliability_api.py::
+      # test_segmentation_by_event_archetype, the one fixture whose two
+      # commitments happen to match FR-LED-05's own candidate pre-filter).
+      # FakeClient/FakeEmbeddingClient (app/llm/client.py, app/ask/
+      # embeddings.py) already exist and are schema-aware for exactly this
+      # call — just never wired into this workflow.
+      CUE_LLM_EXTRACTION_PROVIDER: fake
+      CUE_LLM_REASONING_PROVIDER: fake
+      CUE_EMBED_PROVIDER: fake
 
     steps:
       # v4 ran on the now-deprecated Node 20 runtime; v5+ runs on Node 24.
