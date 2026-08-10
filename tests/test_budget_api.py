@@ -204,6 +204,57 @@ async def test_revise_creates_new_row_and_never_mutates_the_old_one(
 
 
 @pytest.mark.asyncio
+async def test_budget_history_lists_baseline_and_revision_most_recent_first(
+    app_session, authed_org_and_project
+):
+    """Frontend-enablement addition (Prompt F7's own gap-audit check) —
+    GET .../budget only ever returned the current row; nothing showed a
+    baseline alongside a revision that superseded it. `revision_of` links
+    the two, most-recent-first."""
+    org_id, project_id, admin, _admin_token = authed_org_and_project
+    _finance, finance_token = await _member(app_session, org_id, project_id, "finance", admin.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        baseline = await client.post(
+            f"/projects/{project_id}/budget",
+            headers=_headers(finance_token),
+            json=_budget_body(approved_amount=50000),
+        )
+        baseline_id = baseline.json()["id"]
+        revision = await client.post(
+            f"/projects/{project_id}/budget/revise",
+            headers=_headers(finance_token),
+            json=_budget_body(approved_amount=76624),
+        )
+        revision_id = revision.json()["id"]
+
+        history = await client.get(
+            f"/projects/{project_id}/budget/history", headers=_headers(finance_token)
+        )
+
+    assert history.status_code == 200, history.text
+    rows = history.json()
+    assert [r["id"] for r in rows] == [revision_id, baseline_id]
+    assert rows[0]["is_current"] is True
+    assert rows[0]["revision_of"] == baseline_id
+    assert rows[1]["is_current"] is False
+
+
+@pytest.mark.asyncio
+async def test_budget_history_empty_list_when_no_baseline_exists(authed_org_and_project):
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/projects/{project_id}/budget/history", headers=_headers(admin_token)
+        )
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+@pytest.mark.asyncio
 async def test_budget_baseline_has_manual_evidence(app_session, authed_org_and_project):
     """PRD §4.3: Budget's evidence is NOT NULL — 'an approval message...
     otherwise the approving user's action itself, per the same rule as

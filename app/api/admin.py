@@ -28,6 +28,7 @@ from app.api.schemas import (
     DelegationOut,
     MembershipOut,
     MembershipRoleLiteral,
+    ProjectOut,
     UserOut,
 )
 from app.core.db import get_session
@@ -72,6 +73,32 @@ async def read_org_user(
     if user is None:
         raise HTTPException(status_code=404, detail="user not found")
     return user
+
+
+@router.get("/projects", response_model=list[ProjectOut])
+async def list_org_projects(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_org_administrator)],
+) -> list[Project]:
+    """Frontend-enablement addition (Prompt F7's own gap-audit check) — the
+    only project listing before this, `GET /projects` (app/api/projects.py),
+    is FR-ADM-02's own membership/delegation-filtered view: an
+    Administrator on project A but not a member of project B sees B via
+    `/admin/export/{id}` and every other `/admin/*` read
+    (`require_org_administrator`'s own docstring, exercised directly by
+    `tests/test_admin_api.py`'s `test_org_admin_visibility_is_distinct_
+    from_project_membership`) — but had no way to *name* B at all.
+    `GET /admin/delegations`/`GET /admin/roles` can both return rows whose
+    `project_id` refers to a project this admin never joined, a real Class A
+    id-with-no-resolver otherwise (frontend/CLAUDE.md's own gap shape); this
+    closes it the same way `GET /admin/users` already closes the equivalent
+    gap for user ids. No explicit organisation_id filter needed — `projects`
+    carries its own direct-column tenant_isolation RLS policy (migration
+    a895ae03ec5c), same as `users`."""
+    projects = (
+        await session.execute(select(Project).order_by(Project.created_at.desc()))
+    ).scalars().all()
+    return list(projects)
 
 
 @router.get("/roles", response_model=list[MembershipOut])

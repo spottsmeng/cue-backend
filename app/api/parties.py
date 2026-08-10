@@ -128,18 +128,26 @@ async def read_vendor_reliability_history(
 # GET /parties — the vendor/contact directory the reliability endpoint
 # above never had: /parties/{id}/reliability needs a party_id the caller
 # already knows, and until this router existed there was no route in this
-# codebase that could tell a caller which party_ids exist at all. Same
-# require_org_finance gate as reliability (Procurement-tier, org-wide, not
-# project-scoped — Party has no project_id of its own, per its own
-# docstring); same explicit organisation_id filter as _get_party above,
-# for the same reason (`parties` has no RLS policy of its own).
+# codebase that could tell a caller which party_ids exist at all.
+# require_org_finance_or_administrator, not require_org_finance alone — a
+# frontend-enablement fix (Prompt F7's own gap-audit check): FR-NRM-03's
+# channel-identity override screen and FR-NRM-04's organisation-mapping
+# write control are both administrator-only actions that still need to
+# *pick* a party from a real directory, and an administrator who holds
+# neither finance nor producer would otherwise 403 on the only party list
+# in the API — the exact same gate-mismatch shape F6's own round 6 already
+# found and fixed for the organisation_router GETs below (there, the
+# stricter gate was administrator-only against a finance-gated page; here
+# it's the mirror image, a finance-only gate against an administrator-only
+# action). Same explicit organisation_id filter as _get_party above, for
+# the same reason (`parties` has no RLS policy of its own).
 list_router = APIRouter(prefix="/parties", tags=["parties"])
 
 
 @list_router.get("", response_model=list[PartyOut])
 async def list_parties(
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_org_finance)],
+    user: Annotated[User, Depends(require_org_finance_or_administrator)],
     type: PartyTypeLiteral | None = None,
     city: str | None = None,
     vendor_category: str | None = None,
@@ -171,14 +179,15 @@ async def list_parties(
 # header, and to decide whether FR-NRM-04's organisation-mapping section is
 # even applicable — that's person-only), and until this route existed the
 # only way to learn them was to re-fetch the entire org-wide list above and
-# find the one row client-side. Same require_org_finance gate, same
+# find the one row client-side. Same require_org_finance_or_administrator
+# gate as list_parties above (widened together, same reasoning), same
 # explicit organisation_id filter (via _get_party) as every other route in
 # this module — no new access tier introduced.
 @list_router.get("/{party_id}", response_model=PartyOut)
 async def read_party(
     party_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_org_finance)],
+    user: Annotated[User, Depends(require_org_finance_or_administrator)],
 ) -> Party:
     return await _get_party(session, user.organisation_id, party_id)
 

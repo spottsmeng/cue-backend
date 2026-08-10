@@ -1629,6 +1629,63 @@ from `available=False` to real computed values (`price_drift_pct: 13.51%`, match
 covers the same flow through the real UI, both with real Ollama and with `FakeClient`'s new branch
 (CI parity, `CUE_LLM_*_PROVIDER=fake`) — see frontend/PROGRESS.md's own notes for the UI side.
 
+### Frontend-enablement addition, round 7 (during frontend F7, 2026-08-11)
+
+One gap `Prompt F7 — Admin console.txt` found while wiring the Budget baseline/revise screen, same
+"close it on the spot, document it" pattern as rounds 1–6:
+
+- **`GET /projects/{project_id}/budget/history`** (`app/api/budget.py`, no new response schema —
+  `BudgetOut` already exists). Before this, `GET .../budget` only ever returned the single current
+  row — `BudgetOut.revision_of` was a real Class A id-with-no-resolver (frontend/CLAUDE.md's own gap
+  shape): a caller could see *that* the current baseline revises a prior one, never what that prior
+  amount actually was. FR-ADM-11's own "full audit trail and revision history on scope-approved
+  changes" language was already true at the row level (`revise_budget` never mutates a prior row,
+  only flips `is_current`) but had no read surface. Same access tier as the existing current-budget
+  read (`Depends(get_project)`, any project member) — this is a superset of the same information, not
+  a more sensitive one. Most-recent-first, same order convention `list_writeback_history`/
+  `channel_health_history` already use. `tests/test_budget_api.py`, 2 new tests (baseline + revision
+  both present in the right order with `revision_of` linking them; an honest empty list when no
+  baseline exists yet).
+
+`uv run pytest` green afterward. `pnpm generate:api` re-run against the live reload; frontend's
+`lib/api/schema.gen.ts` picked up the new operation with no other diff.
+
+A second gap, same round, found while wiring the channel-identity-override and organisation-mapping
+write screens:
+
+- **`GET /parties` and `GET /parties/{party_id}` widened from `require_org_finance` to
+  `require_org_finance_or_administrator`** (`app/api/parties.py`'s `list_router`). Both
+  FR-NRM-03's manual identity-override screen and FR-NRM-04's organisation-mapping write control are
+  `require_org_administrator`-only actions, but each needs to *pick* a party from a real directory
+  first — the only party list in the API was finance/producer-gated, so a pure administrator (neither
+  finance nor producer) would 403 trying to name a party for either action. The mirror image of round
+  6's own fix (there, an administrator-only gate was stricter than the finance-gated page around it;
+  here a finance-only gate is stricter than the administrator-only actions that need it) — same
+  `require_org_finance_or_administrator` dependency, already existing for exactly this shape of
+  mismatch, reused rather than a new one invented. `tests/test_parties_list_api.py`, 2 new tests
+  (administrator-without-finance-or-producer succeeds on both routes); the existing
+  finance-or-producer-required tests are unaffected since `project_manager` (their own probe role) is
+  neither.
+
+`uv run pytest` green: 548 passing (up from 546 after the budget-history addition above).
+
+A third gap, same round, found while wiring the org-wide Delegations screen:
+
+- **`GET /admin/projects`** (`app/api/admin.py`, no new response schema — `ProjectOut` already
+  exists). `GET /admin/delegations`/`GET /admin/roles` can both return rows whose `project_id`
+  refers to a project the calling Administrator was never a member of —
+  `require_org_administrator`'s own docstring says exactly this ("free to read/list across every
+  project in that organisation, not just ones they happen to be a member of"), already exercised by
+  `test_org_admin_visibility_is_distinct_from_project_membership` for `/admin/export`. The only
+  project listing before this, `GET /projects`, is FR-ADM-02's own membership-filtered view — it
+  cannot resolve a project_id the caller doesn't belong to, a real Class A id-with-no-resolver on the
+  delegations/roles audit screens specifically (frontend/CLAUDE.md's own gap shape). No explicit
+  organisation filter needed — `projects` carries its own direct-column `tenant_isolation` RLS policy,
+  same as `users`. `tests/test_admin_api.py`, 1 new test (an Administrator on project A only still
+  resolves project B by name via this endpoint).
+
+`uv run pytest` green: 549 passing (up from 548). `pnpm generate:api` re-run; no other diff.
+
 ## Updating this file
 
 When a milestone completes:

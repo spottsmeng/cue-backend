@@ -2,10 +2,14 @@
 directory /parties/{id}/reliability never had a way to populate: that
 endpoint needs a party_id the caller already knows, and until this router
 existed nothing in this codebase could tell a caller which party_ids exist.
-Same require_org_finance gate, same org-scoped explicit-filter shape (Party
-has no RLS policy of its own) as the reliability endpoints it sits beside —
-tested here as the same two independent properties this project's other
-org-wide surfaces already establish (role-gating, cross-org isolation).
+require_org_finance_or_administrator-gated (widened from require_org_finance
+alone during Prompt F7's own gap-audit check — an administrator with neither
+finance nor producer needs this directory too, to pick a party for FR-NRM-03's
+channel-identity override or FR-NRM-04's organisation-mapping write control),
+same org-scoped explicit-filter shape (Party has no RLS policy of its own) as
+the reliability endpoints it sits beside — tested here as the same two
+independent properties this project's other org-wide surfaces already
+establish (role-gating, cross-org isolation).
 """
 
 import uuid
@@ -119,6 +123,25 @@ async def test_list_parties_requires_finance_or_producer_role(app_session, authe
 
 
 @pytest.mark.asyncio
+async def test_list_parties_allows_administrator_without_finance_or_producer(
+    app_session, authed_org_and_project, parties
+):
+    """Prompt F7's own gap-audit fix: an administrator (Admin console's own
+    gate) who holds neither finance nor producer must still be able to
+    browse the party directory — they need it to pick a target for
+    FR-NRM-03's channel-identity override, an administrator-only action
+    that would otherwise have no way to name a party at all."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/parties", headers=_headers(admin_token))
+
+    assert response.status_code == 200, response.text
+    assert {row["display_name"] for row in response.json()} >= {"Test Vendor"}
+
+
+@pytest.mark.asyncio
 async def test_read_party_returns_the_seeded_party(app_session, authed_org_and_project, parties):
     """Frontend-enablement addition: GET /parties/{party_id} — a vendor
     detail page's own single-resource read, closed during F6's own
@@ -155,6 +178,21 @@ async def test_read_party_404_for_another_organisations_party(app_session, authe
         response = await client.get(f"/parties/{other_party.id}", headers=_headers(finance_token))
 
     assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_read_party_allows_administrator_without_finance_or_producer(
+    app_session, authed_org_and_project, parties
+):
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    vendor, _internal = parties
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/parties/{vendor.id}", headers=_headers(admin_token))
+
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == str(vendor.id)
 
 
 @pytest.mark.asyncio

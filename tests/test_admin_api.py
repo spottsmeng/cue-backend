@@ -105,6 +105,64 @@ async def test_list_org_delegations(app_session, authed_org_and_project):
 
 
 @pytest.mark.asyncio
+async def test_list_org_projects_sees_projects_the_admin_never_joined(
+    app_session, seeded_vertical_id
+):
+    """Frontend-enablement addition (Prompt F7's own gap-audit check) —
+    GET /admin/projects must resolve every project_id GET /admin/delegations
+    and GET /admin/roles can return, including one this Administrator was
+    never a member of (the same property test_org_admin_visibility_is_
+    distinct_from_project_membership below already established for
+    /admin/export)."""
+    org_id = uuid.uuid4()
+    project_a_id = uuid.uuid4()
+    project_b_id = uuid.uuid4()
+
+    await set_org_context(app_session, org_id)
+    app_session.add(Organisation(id=org_id, name="Test Org"))
+    await app_session.flush()
+    app_session.add(
+        Project(
+            id=project_a_id, organisation_id=org_id, vertical_id=seeded_vertical_id,
+            name="Project A", timezone="Asia/Singapore",
+        )
+    )
+    app_session.add(
+        Project(
+            id=project_b_id, organisation_id=org_id, vertical_id=seeded_vertical_id,
+            name="Project B", timezone="Asia/Singapore",
+        )
+    )
+    await app_session.flush()
+
+    subject = f"admin-a-{uuid.uuid4()}"
+    admin_user = User(
+        organisation_id=org_id,
+        issuer=get_identity_settings().local_issuer,
+        external_subject=subject,
+        email=f"{subject}@example.test",
+    )
+    app_session.add(admin_user)
+    await app_session.flush()
+    app_session.add(
+        Membership(
+            user_id=admin_user.id, project_id=project_a_id, role="administrator",
+            granted_by=admin_user.id,
+        )
+    )
+    await app_session.commit()
+    token = mint_token(org_id, subject=subject, email=admin_user.email)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/admin/projects", headers=_headers(token))
+
+    assert response.status_code == 200, response.text
+    ids = {row["id"] for row in response.json()}
+    assert {str(project_a_id), str(project_b_id)} <= ids
+
+
+@pytest.mark.asyncio
 async def test_org_admin_visibility_is_distinct_from_project_membership(app_session, seeded_vertical_id):
     """The exact property Prompt 5's testing expectation names explicitly: a
     user who is Administrator on project A but not a member of project B

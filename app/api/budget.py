@@ -53,6 +53,33 @@ async def read_current_budget(
     return budget
 
 
+@router.get("/history", response_model=list[BudgetOut])
+async def list_budget_history(
+    project: Annotated[Project, Depends(get_project)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[Budget]:
+    """Frontend-enablement addition (Prompt F7's own gap-audit check) —
+    FR-ADM-11's 'full audit trail and revision history' has always been real
+    at the row level (`revise_budget` below never mutates a prior row, only
+    flips `is_current`), but nothing ever read more than the single current
+    row back. `BudgetOut.revision_of` is a Class A id-with-no-resolver
+    otherwise: a caller could see *that* the current baseline revises
+    something, never *what* the prior amount was. Every project member may
+    call this (`Depends(get_project)`'s own any-membership-or-delegation
+    tier) — same read tier as the current-budget endpoint above, since this
+    is a superset of the same information, not a more sensitive one. Most
+    recent first, same order convention `list_writeback_history` and
+    `channel_health_history` already use."""
+    budgets = (
+        await session.execute(
+            select(Budget)
+            .where(Budget.project_id == project.id)
+            .order_by(Budget.approved_at.desc())
+        )
+    ).scalars().all()
+    return list(budgets)
+
+
 @router.post("", response_model=BudgetOut, status_code=201)
 async def create_budget_baseline(
     body: BudgetWrite,
