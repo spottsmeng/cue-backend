@@ -119,6 +119,58 @@ async def test_list_parties_requires_finance_or_producer_role(app_session, authe
 
 
 @pytest.mark.asyncio
+async def test_read_party_returns_the_seeded_party(app_session, authed_org_and_project, parties):
+    """Frontend-enablement addition: GET /parties/{party_id} — a vendor
+    detail page's own single-resource read, closed during F6's own
+    gap-audit check (frontend/CLAUDE.md's Class A/B checklist)."""
+    org_id, project_id, admin, _admin_token = authed_org_and_project
+    vendor, _internal = parties
+    _finance, finance_token = await _member(app_session, org_id, project_id, "finance", admin.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/parties/{vendor.id}", headers=_headers(finance_token))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == str(vendor.id)
+    assert body["display_name"] == "Test Vendor"
+
+
+@pytest.mark.asyncio
+async def test_read_party_404_for_another_organisations_party(app_session, authed_org_and_project, parties):
+    org_id, project_id, admin, _admin_token = authed_org_and_project
+    _finance, finance_token = await _member(app_session, org_id, project_id, "finance", admin.id)
+
+    org_b = uuid.uuid4()
+    await set_org_context(app_session, org_b)
+    app_session.add(Organisation(id=org_b, name="Org B"))
+    await app_session.flush()
+    other_party = Party(organisation_id=org_b, display_name="Org B Vendor", type="vendor_org")
+    app_session.add(other_party)
+    await app_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/parties/{other_party.id}", headers=_headers(finance_token))
+
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_read_party_requires_finance_or_producer_role(app_session, authed_org_and_project, parties):
+    org_id, project_id, admin, _admin_token = authed_org_and_project
+    vendor, _internal = parties
+    _pm, pm_token = await _member(app_session, org_id, project_id, "project_manager", admin.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/parties/{vendor.id}", headers=_headers(pm_token))
+
+    assert response.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_list_parties_is_isolated_across_organisations(app_session, authed_org_and_project, parties):
     """FR-VRG-07's own "never expose a vendor's metrics to another vendor"
     starts here: an org that never granted access to another org's parties

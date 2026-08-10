@@ -1476,6 +1476,55 @@ Model *quality* — a genuinely different question from "does the wiring work" �
 about that changed; this correction only removed a real model from a place it should never have
 been running in the first place.
 
+### Frontend-enablement addition, round 6 (during frontend F6, 2026-08-10)
+
+One gap `Prompt F6 — Vendor Reliability Graph.txt` found while wiring the vendor detail page — same
+"close it on the spot, document it" pattern as rounds 1–5:
+
+- **`GET /parties/{party_id}`** (`app/api/parties.py`'s `list_router`, no new response schema —
+  `PartyOut` already exists for the list operation). Before this, the only way to learn a party's
+  own `display_name`/`type`/`city` was `GET /parties` (the whole org-wide directory) — there was no
+  single-resource read at all, unlike every other entity this frontend plan touches. A vendor detail
+  page needs this party's own fields to render a header, and specifically needs `type` to decide
+  whether FR-NRM-04's organisation-mapping section even applies (person-only) — re-fetching and
+  linear-scanning the entire directory client-side for one row was the only alternative. Same
+  `require_org_finance` gate, same `_get_party` org-scoped 404 shape every other route in this module
+  already uses — no new access tier. `tests/test_parties_list_api.py`, 3 new tests (found by id,
+  404 for another organisation's party, 403 for a non-finance role).
+- **`ProjectOut.archetype_code`** (`app/api/schemas.py`) — `Project.archetype_code` is FR-VRG-02's
+  own "event archetype" segmentation axis (the column's own docstring says so verbatim), set once at
+  `materialize_archetype` time, but no response schema ever exposed it — confirmed by grep before
+  assuming, the same way round 1–5's gaps were each confirmed against the code rather than the
+  prompt's own claims. `/parties/{id}/reliability`'s `event_archetype` query param had no way for a
+  caller to discover which values are real without this — `Project.archetype_code` is free text, not
+  an `ontology_terms` vocabulary, so there's no `GET .../ontology-terms?category=event_archetype`
+  equivalent either; `GET /projects` (already org-member-readable, no new gate) is now the only
+  discovery path, and frontend/PROGRESS.md's F6 notes name this explicitly rather than fabricate a
+  dropdown. Purely additive, no migration (the column already existed) — every existing `ProjectOut`
+  caller unaffected, confirmed by the full suite staying green.
+
+`uv run pytest` green afterward: 528 passing (up from 524).
+
+**One pre-existing, unrelated gap re-confirmed while verifying this round, not caused by it:**
+running the full frontend `pnpm test:e2e` suite locally against a freshly-restarted backend without
+`CUE_LLM_*_PROVIDER=fake`/`CUE_EMBED_PROVIDER=fake` set (this session's own restart, needed to pick
+up the two additions above) reproduced exactly the failure mode the "Architecture correction,
+post-F5" section above already diagnoses: `e2e/living-wip.spec.ts`'s write-back draft assertion and
+most of `e2e/ask.spec.ts` time out against real local Ollama inference, because both spec files'
+own comments now assume the fake client (post-F5 cleanup removed their old generous local
+timeouts). Setting the three `*_PROVIDER=fake` env vars on the backend process (matching
+`.github/workflows/ci.yml` exactly) fixed `living-wip.spec.ts` fully and fixed all but one
+`ask.spec.ts` spec; that one remaining failure (`each of the five summary variants...`, a decision-
+history text match) reproduces even with fake providers on the API server, most plausibly because
+`e2e/global-setup.ts` spawns `scripts/seed_dev_data.py` as a *separate* process that doesn't inherit
+whatever env a developer's shell happens to export to the API server — the seed's own
+`run_embedding_sweep()` call would then embed with whatever provider *that* process defaults to.
+Not investigated further or fixed this session: it's an F5 surface, pre-dates this round's own two
+additions (neither touches Ask, embeddings, or decision-log content), and reproduces identically on
+a checkout without this round's changes. Worth a future session exporting `CUE_LLM_*_PROVIDER=fake`
+for both processes at once (or teaching `global-setup.ts` to pass it through explicitly) rather than
+relying on ambient shell state neither process is guaranteed to share.
+
 ## Updating this file
 
 When a milestone completes:

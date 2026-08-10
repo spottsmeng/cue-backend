@@ -177,6 +177,14 @@ class ProjectOut(BaseModel):
     event_start: datetime | None
     event_end: datetime | None
     archived_at: datetime | None
+    # Frontend-enablement addition (Prompt F6's own gap-audit check):
+    # Project.archetype_code (app/models/project.py) is FR-VRG-02's own
+    # "event archetype" segmentation axis, set once at materialize_archetype
+    # time, but was never surfaced by any response schema before this —
+    # `GET /parties/{id}/reliability`'s own `event_archetype` query param had
+    # no way to discover which values are real for a caller's own projects.
+    # Additive, no migration needed (the column already exists).
+    archetype_code: str | None
     created_at: datetime
     updated_at: datetime
 

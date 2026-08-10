@@ -44,6 +44,7 @@ from app.foresight.models import Notification, Risk
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.models import (
+    AuditLog,
     Budget,
     Channel,
     ChannelIdentity,
@@ -56,6 +57,8 @@ from app.models import (
     Project,
 )
 from app.models.vertical import Vertical
+from app.parties.organisation_mapping import set_current_organisation
+from app.parties.service import recompute_vendor_metrics
 from app.twin.models import Dependency
 from app.twin.service import get_milestone_type_term, materialize_archetype
 
@@ -220,6 +223,27 @@ async def main() -> None:
         vendor = Party(organisation_id=org_id, display_name="Golden Sound & Light Pte Ltd", type="vendor_org")
         internal = Party(organisation_id=org_id, display_name="Pico Production Team", type="internal_staff")
         session.add_all([vendor, internal])
+        await session.flush()
+
+        # F6 enablement (Vendor Reliability Graph): `vendor_category_term_id`/
+        # `city` are FR-VRG-02's segmentation axes — left unset before this,
+        # they'd make `/parties?vendor_category=...` and every segment picker
+        # this milestone's frontend builds untestable against real data.
+        # `av_led` is a real seeded ontology_terms row (seed_data/
+        # vendor_categories.py, vertical-scoped to event-production, applied
+        # by an early migration), not an invented code.
+        av_led_term = (
+            await session.execute(
+                select(OntologyTerm).where(
+                    OntologyTerm.category == "vendor_category",
+                    OntologyTerm.code == "av_led",
+                    OntologyTerm.vertical_id == vertical_id,
+                    OntologyTerm.organisation_id.is_(None),
+                )
+            )
+        ).scalar_one()
+        vendor.vendor_category_term_id = av_led_term.id
+        vendor.city = "Singapore"
         await session.flush()
 
         channel = Channel(project_id=project_id, type="whatsapp", external_ref=f"dev-seed-vendor-group-{org_suffix}")
@@ -479,6 +503,123 @@ async def main() -> None:
                 language="en", original_text="2000mm x 1040mm",
             )
         )
+
+        # F6 enablement (Vendor Reliability Graph): a second vendor (a
+        # different category/city, for the directory's own filter controls
+        # to have something real to narrow down), a "person" party mapped to
+        # the first vendor (FR-NRM-04, so the party-organisation-mapping
+        # panel has a real row instead of an honest-but-empty history), and
+        # enough real commitment/evidence/audit history on the first vendor
+        # for `median_response_time_days` and `on_time_rate` to compute a
+        # genuine value rather than sitting `available=False` next to
+        # `revision_churn`/`price_drift_pct` (which stay unavailable no
+        # matter what this script adds — both are structurally blocked on
+        # `Commitment.supersedes`, FR-LED-05, per app/parties/compute.py's own
+        # module docstring; nothing here can or should work around that).
+        staffing_term = (
+            await session.execute(
+                select(OntologyTerm).where(
+                    OntologyTerm.category == "vendor_category",
+                    OntologyTerm.code == "staffing",
+                    OntologyTerm.vertical_id == vertical_id,
+                    OntologyTerm.organisation_id.is_(None),
+                )
+            )
+        ).scalar_one()
+        second_vendor = Party(
+            organisation_id=org_id, display_name="Nimbus Event Staffing Pte Ltd", type="vendor_org",
+            vendor_category_term_id=staffing_term.id, city="Kuala Lumpur",
+        )
+        session.add(second_vendor)
+
+        vendor_contact = Party(organisation_id=org_id, display_name="Amanda Lim", type="person")
+        session.add(vendor_contact)
+        await session.flush()
+        await set_current_organisation(
+            session, organisation_id=org_id, person_party_id=vendor_contact.id,
+            organisation_party_id=vendor.id, role_title="Account manager",
+            effective_from=now - timedelta(days=180),
+        )
+
+        # Commitment 3: delivered on time — third Evidence timestamp on this
+        # vendor (median_response_time_days needs >=3) and the first
+        # delivered/due-dated commitment (on_time_rate needs at least one).
+        on_time_commitment = Commitment(
+            project_id=project_id, party_id=vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="delivered",
+            deliverable_en="AV equipment load-in test",
+            due_at=now - timedelta(days=1), confidence=0.95, field_confidence={},
+            verification_state="human_verified",
+            verified_by=users_by_role["project_manager"].id, verified_at=now,
+        )
+        session.add(on_time_commitment)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=on_time_commitment.id, channel="manual", sent_at=now - timedelta(days=5),
+                language="en", original_text="AV load-in test completed clean, no issues found.",
+            )
+        )
+        await session.flush()
+        session.add(
+            AuditLog(
+                project_id=project_id, commitment_id=on_time_commitment.id, action="state_transition",
+                actor_id=users_by_role["project_manager"].id, from_state="at_risk", to_state="delivered",
+                occurred_at=now - timedelta(days=2),
+            )
+        )
+        await session.flush()
+
+        # First recompute — a real snapshot with median_response_time_days
+        # and on_time_rate (1/1) both genuinely available, deviation_frequency
+        # from the auto-drafted deviation above, revision_churn/price_drift_pct
+        # honestly unavailable. Committed here (not deferred to the single
+        # commit at the end of this script, as everything else is) so the
+        # second recompute below lands in a later Postgres transaction and
+        # gets a real, distinct `computed_at` — `VendorMetric.computed_at`
+        # is `server_default=func.now()`, which is fixed for the lifetime of
+        # one transaction, so two recomputes in the same uncommitted
+        # transaction would otherwise tie on this table's own "history" sort
+        # key. FR-VRG-03's own trend view (`GET .../reliability/history`)
+        # needs a real, orderable second point, not two ties.
+        await recompute_vendor_metrics(session, vendor.id)
+        await session.commit()
+
+        # Commitment 4: delivered late — pulls on_time_rate down to 1/2 and
+        # deviation_frequency's denominator up, so the history view's second
+        # snapshot (below) is a genuinely different set of numbers, not a
+        # re-write of the first.
+        late_commitment = Commitment(
+            project_id=project_id, party_id=vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="delivered",
+            deliverable_en="Backup generator fuel top-up",
+            due_at=now - timedelta(days=10), confidence=0.9, field_confidence={},
+            verification_state="human_verified",
+            verified_by=users_by_role["project_manager"].id, verified_at=now,
+        )
+        session.add(late_commitment)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=late_commitment.id, channel="manual", sent_at=now - timedelta(days=12),
+                language="en", original_text="Generator fuel top-up confirmed, ran two days past schedule.",
+            )
+        )
+        await session.flush()
+        session.add(
+            AuditLog(
+                project_id=project_id, commitment_id=late_commitment.id, action="state_transition",
+                actor_id=users_by_role["project_manager"].id, from_state="at_risk", to_state="delivered",
+                occurred_at=now - timedelta(days=9),
+            )
+        )
+        await session.flush()
+
+        # Second recompute — a real second history point, not a duplicate:
+        # on_time_rate now 1/2 (was 1/1), deviation_frequency's denominator
+        # now 4 commitments (was 3), median_response_time_days recomputed
+        # over 4 timestamps (was 3).
+        await recompute_vendor_metrics(session, vendor.id)
 
         await session.commit()
 

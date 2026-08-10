@@ -160,6 +160,25 @@ async def list_parties(
     return list((await session.execute(stmt)).scalars().all())
 
 
+# Frontend-enablement addition (Prompt F6's own gap-audit check, frontend/
+# CLAUDE.md's "Class A" shape — though this one is closer to a missing
+# single-resource read than a missing label resolver): a vendor detail page
+# needs this party's own display_name/type/city to render at all (a page
+# header, and to decide whether FR-NRM-04's organisation-mapping section is
+# even applicable — that's person-only), and until this route existed the
+# only way to learn them was to re-fetch the entire org-wide list above and
+# find the one row client-side. Same require_org_finance gate, same
+# explicit organisation_id filter (via _get_party) as every other route in
+# this module — no new access tier introduced.
+@list_router.get("/{party_id}", response_model=PartyOut)
+async def read_party(
+    party_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_org_finance)],
+) -> Party:
+    return await _get_party(session, user.organisation_id, party_id)
+
+
 # FR-NRM-04: a person's effective-dated vendor-company mapping — a
 # roster-management action, gated by require_org_administrator (same
 # reasoning app/api/consent.py's own admin-only surface already gives),
