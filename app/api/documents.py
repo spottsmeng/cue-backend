@@ -15,6 +15,7 @@ from app.api.schemas import (
     DocumentVersionOut,
     EvidenceOut,
     SpecClaimOut,
+    SpecClaimResolvedOut,
 )
 from app.core.db import get_session
 from app.documents import service as documents_service
@@ -150,6 +151,43 @@ async def search_documents(
         )
         for version, document, rank in rows
     ]
+
+
+@router.get("/spec-claims/{spec_claim_id}", response_model=SpecClaimResolvedOut)
+async def read_spec_claim(
+    spec_claim_id: uuid.UUID,
+    project: Annotated[Project, Depends(get_project)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> SpecClaimResolvedOut:
+    """Frontend-enablement addition (F4): resolves a `contradicts` target
+    that may live on a different document/version than the one the caller
+    is currently viewing — see SpecClaimResolvedOut's own docstring.
+    Registered ahead of `/{document_id}` (matching this router's existing
+    `/search` precedent) so "spec-claims" is never mistaken for a
+    document_id path segment."""
+    claim = (
+        await session.execute(
+            select(SpecClaim)
+            .join(DocumentVersion, DocumentVersion.id == SpecClaim.document_version_id)
+            .join(Document, Document.id == DocumentVersion.document_id)
+            .where(SpecClaim.id == spec_claim_id, Document.project_id == project.id)
+        )
+    ).scalar_one_or_none()
+    if claim is None:
+        raise HTTPException(status_code=404, detail="spec claim not found")
+    version = (
+        await session.execute(
+            select(DocumentVersion).where(DocumentVersion.id == claim.document_version_id)
+        )
+    ).scalar_one()
+    document = await _get_document(session, project, version.document_id)
+    base = await _to_spec_claim_out(session, claim)
+    return SpecClaimResolvedOut(
+        **base.model_dump(),
+        document_id=document.id,
+        document_name=document.name,
+        document_version_no=version.version_no,
+    )
 
 
 @router.get("/{document_id}", response_model=DocumentOut)

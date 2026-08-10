@@ -1336,6 +1336,43 @@ gate `/members/me` already established; and a cross-project isolation check (`me
 clause, independent of RLS, never leaks a second project's members). `uv run pytest` green
 afterward: 508 passing (up from 504).
 
+### Frontend-enablement addition, round 4 (during frontend F4, 2026-08-10)
+
+One gap `Prompt F4 — Documents.txt` found while wiring the spec-claims view — same "close it on the
+spot, document it" pattern as rounds 1–3:
+
+- **`GET /projects/{project_id}/documents/spec-claims/{spec_claim_id}`** (`app/api/documents.py`,
+  `SpecClaimResolvedOut` in `app/api/schemas.py`) — `SpecClaim.contradicts` (FR-DOC-08) can point at
+  a claim on a *different* document version than the one currently being viewed:
+  `app/foresight/contradiction.py`'s own detector compares claims project-wide by shared
+  `deliverable_id`/`location_code`, never restricted to a single version. `GET
+  .../versions/{id}/spec-claims` only ever returns claims for one version, so a `contradicts` target
+  outside that list was otherwise an unresolvable UUID with no document to reach — the same "id
+  surfaced with no paired resolver" gap shape as round 3's `OntologyTermOut.id`, just for a
+  different field. `SpecClaimResolvedOut` extends `SpecClaimOut` with `document_id`/`document_name`/
+  `document_version_no` — enough to render "conflicts with X at Y, from document Z" and link out to
+  it — without touching `SpecClaim`'s own field set (CUE-PRD.md §4.3's schema, already fixed).
+  Registered ahead of the router's existing `/{document_id}` route (same `/search`-before-
+  `/{document_id}` precedent already in this file) so `"spec-claims"` is never mistaken for a
+  `document_id` path segment.
+
+`tests/test_frontend_enablement_f4.py`, 2 new tests: a cross-document `contradicts` pair resolves
+to the target claim's real document identity (not just "some UUID present"); a claim requested
+under a project it doesn't belong to 404s, the same project-scoping shape every other document
+endpoint already has. `uv run pytest` green afterward: 510 passing (up from 508).
+
+**`scripts/seed_dev_data.py` extended again**, same file, same "extend the seed over hand-crafting a
+one-off fixture" preference F1's own TESTING EXPECTATION set. F4's own TESTING EXPECTATION needed "a
+document version seeded with at least one `contradicts` pair" — `app/foresight/contradiction.py`'s
+real detector only ever fires from the arq worker's periodic sweep on real elapsed time, the same
+"not something Playwright can wait on" gap F3's own `risk_silence`/`risk_forecast` ORM-direct
+fixtures already work around, so this follows suit: two `Document`+`DocumentVersion`+`SpecClaim`
+rows (`quotation.pdf`/`shop-drawing.pdf`, both location `H`, dimension `2040mm x 1040mm` vs. `2000mm
+x 1040mm`), `contradicts` wired directly rather than waiting on a sweep. `storage_ref` points at no
+real MinIO object on purpose — this fixture pair only backs the spec-claims contradiction view;
+`e2e/documents.spec.ts`'s own upload/version/approve test uploads a fresh document through the real
+UI instead, exercising the real `StorageBackend` for that path.
+
 ## Updating this file
 
 When a milestone completes:

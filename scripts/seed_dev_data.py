@@ -37,6 +37,7 @@ from sqlalchemy import select, text
 
 from app.capture.models import Message
 from app.core.db import async_session_factory
+from app.documents.models import Document, DocumentVersion, SpecClaim
 from app.foresight.deviation import create_manual_deviation, draft_deviation
 from app.foresight.models import Notification, Risk
 from app.identity.config import get_identity_settings
@@ -401,6 +402,81 @@ async def main() -> None:
             class_code="delay", description_en="Rigging crew call time slipped two hours — resolved on site.",
             milestone_id=content_load.id,
             original_text="Rigging crew arrived two hours late; resolved by shifting the load-in window (scripts/seed_dev_data.py fixture).",
+        )
+
+        # F4 enablement (Documents): app/foresight/contradiction.py's own
+        # detector only ever runs from scan_contradictions inside the arq
+        # worker's periodic sweep — the same "not something Playwright can
+        # wait on" gap F3's own risk_silence/risk_forecast fixtures above
+        # already work around. Two documents, one spec claim each,
+        # `contradicts` wired directly — same ORM-direct SpecClaim pattern
+        # tests/test_foresight_contradiction.py's own _make_claim fixture
+        # uses — so e2e/documents.spec.ts's own TESTING EXPECTATION has a
+        # real cross-document contradiction to render and link between,
+        # rather than one this script waits on a sweep to produce.
+        # `storage_ref` points at no real MinIO object (this fixture never
+        # exercises download/approve on these two rows — e2e's own upload
+        # test uploads a fresh document through the real UI, hitting the
+        # real StorageBackend, for that path instead); DocumentVersion.
+        # evidence is still a real, NOT-NULL-enforced row either way.
+        quotation_doc = Document(project_id=project_id, name="LED wall quotation.pdf")
+        session.add(quotation_doc)
+        await session.flush()
+        quotation_version = DocumentVersion(
+            document_id=quotation_doc.id, version_no=1,
+            storage_ref=f"documents/{quotation_doc.id}/v1/seed",
+            extracted_text="Location H: 2040mm x 1040mm LED wall panel, qty 1 set.",
+        )
+        session.add(quotation_version)
+        await session.flush()
+        session.add(
+            Evidence(
+                document_version_id=quotation_version.id, channel="manual", sent_at=now,
+                language="en", original_text="Uploaded via scripts/seed_dev_data.py fixture.",
+            )
+        )
+        quotation_doc.current_version_id = quotation_version.id
+        quotation_claim = SpecClaim(
+            document_version_id=quotation_version.id, location_code="H", attribute="dimension",
+            value="2040mm x 1040mm",
+        )
+        session.add(quotation_claim)
+        await session.flush()
+        session.add(
+            Evidence(
+                spec_claim_id=quotation_claim.id, channel="manual", sent_at=now,
+                language="en", original_text="2040mm x 1040mm",
+            )
+        )
+
+        shop_drawing_doc = Document(project_id=project_id, name="LED wall shop drawing.pdf")
+        session.add(shop_drawing_doc)
+        await session.flush()
+        shop_drawing_version = DocumentVersion(
+            document_id=shop_drawing_doc.id, version_no=1,
+            storage_ref=f"documents/{shop_drawing_doc.id}/v1/seed",
+            extracted_text="Location H: 2000mm x 1040mm LED wall panel, qty 1 set.",
+        )
+        session.add(shop_drawing_version)
+        await session.flush()
+        session.add(
+            Evidence(
+                document_version_id=shop_drawing_version.id, channel="manual", sent_at=now,
+                language="en", original_text="Uploaded via scripts/seed_dev_data.py fixture.",
+            )
+        )
+        shop_drawing_doc.current_version_id = shop_drawing_version.id
+        shop_drawing_claim = SpecClaim(
+            document_version_id=shop_drawing_version.id, location_code="H", attribute="dimension",
+            value="2000mm x 1040mm", contradicts=quotation_claim.id,
+        )
+        session.add(shop_drawing_claim)
+        await session.flush()
+        session.add(
+            Evidence(
+                spec_claim_id=shop_drawing_claim.id, channel="manual", sent_at=now,
+                language="en", original_text="2000mm x 1040mm",
+            )
         )
 
         await session.commit()

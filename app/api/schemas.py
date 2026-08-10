@@ -711,6 +711,24 @@ class DocumentSearchResult(BaseModel):
     rank: float
 
 
+class SpecClaimResolvedOut(SpecClaimOut):
+    """F4 frontend-enablement addition: `SpecClaim.contradicts` can point at
+    a claim on a *different* document version — Foresight's own
+    contradiction detector (app/foresight/contradiction.py) compares claims
+    project-wide by shared deliverable_id/location_code, not just within one
+    version. `GET .../versions/{id}/spec-claims` only returns claims for one
+    version, so a `contradicts` target outside that list is otherwise an
+    unresolvable UUID with no way to reach its own document. This adds just
+    enough document identity (id, name, the version's own number) to render
+    "conflicts with <attribute>=<value> at <location_code>, from <document
+    name>" and link out to it — doesn't touch SpecClaim's own field set,
+    which CUE-PRD.md §4.3 already fixed."""
+
+    document_id: uuid.UUID
+    document_name: str
+    document_version_no: int
+
+
 # --- Foresight (PRD §6.9 FR-FOR / §6.7 FR-DEV / §6.15 FR-NTF) -----------
 
 
