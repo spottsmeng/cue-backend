@@ -11,7 +11,7 @@ cached first.
 
 import pytest
 
-from app.llm.client import AnthropicClient, OllamaClient
+from app.llm.client import AnthropicClient, FakeClient, OllamaClient
 from app.llm.config import get_llm_settings
 from app.llm.factory import get_client
 
@@ -63,6 +63,17 @@ def test_anthropic_without_api_key_raises(monkeypatch):
 
     with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
         get_client("extraction")
+
+
+def test_env_switches_reasoning_to_fake(monkeypatch):
+    """CI's own provider — no real model, ever (see app/llm/client.py's
+    FakeClient docstring for why: Ollama is scoped to the developer's own
+    local machine only, never a remote CI runner)."""
+    monkeypatch.setenv("CUE_LLM_REASONING_PROVIDER", "fake")
+
+    client = get_client("reasoning")
+
+    assert isinstance(client, FakeClient)
 
 
 def test_unknown_provider_raises(monkeypatch):

@@ -15,7 +15,7 @@ class LLMSettings(BaseSettings):
     .env to point both at Anthropic — see CUE-Tech-Stack.md §2.4.
     """
 
-    extraction_provider: str = "ollama"  # "ollama" | "anthropic"
+    extraction_provider: str = "ollama"  # "ollama" | "anthropic" | "fake"
     extraction_model: str = "qwen2.5:14b"
     reasoning_provider: str = "ollama"
     reasoning_model: str = "qwen2.5:32b"

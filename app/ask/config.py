@@ -24,7 +24,7 @@ class EmbeddingSettings(BaseSettings):
     provider is, not a third-party API.
     """
 
-    provider: str = "ollama"  # "ollama" | "tei"
+    provider: str = "ollama"  # "ollama" | "tei" | "fake"
     model: str = "bge-m3"
     # Must match DocumentVersion.embedding's Vector(1024) column
     # (app/documents/models.py) and this new module's own RetrievalChunk.

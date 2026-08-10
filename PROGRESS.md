@@ -1423,6 +1423,59 @@ column width; `nomic-embed-text`, already present locally, is 768-dim and isn't 
 substitute). Environment state, not a code change — noted here in case a later fresh sandbox needs
 the same one-time pull.
 
+### Architecture correction, post-F5 (2026-08-10) — real Ollama is never used in CI, period
+
+The round above's own framing ("pull bge-m3 into CI," "widen CI timeouts for real-model latency")
+was wrong in a way worth recording plainly, not quietly editing away. This project's own dev
+strategy (CLAUDE.md's Models table) scopes real Ollama models to the developer's own local
+machine only — dev, test, demo — switching to a frontier model (Anthropic) for production once
+the app is solid, specifically to control cost. A GitHub Actions CI runner is neither of those
+places. Installing and running real Ollama models in `frontend/.github/workflows/ci.yml`'s `e2e`
+job (first for F1's write-back spec, before this session; extended much further by this session
+for F5) was a boundary violation regardless of how the timeout budget was tuned — chasing GPU
+runners or bigger timeouts to make that architecture fast enough would have papered over the
+actual mistake, not fixed it.
+
+**The real fix: `FakeClient` (`app/llm/client.py`) and `FakeEmbeddingClient`
+(`app/ask/embeddings.py`)** — a third provider option (`CUE_LLM_EXTRACTION_PROVIDER=fake`,
+`CUE_LLM_REASONING_PROVIDER=fake`, `CUE_EMBED_PROVIDER=fake`) alongside the existing
+`ollama`/`anthropic`/`tei` choices, wired into `get_client()`/`get_embedding_client()` the same
+env-driven, provider-not-model way those already switch. CI now never talks to a model at all.
+`FakeClient` is schema-aware (branches on `schema["required"]`, since a real end-to-end run makes
+many different real calls in one session, not one fixed canned response the way each pytest
+file's own local `FakeModelClient` gets away with): a keyword check against the intent-
+classification schema's own trailing `Message: ` field (never the prompt's static example text,
+which names "chase the vendor" as an example and would otherwise always match); an honest word-
+overlap judgment between the question and each retrieved excerpt for Ask's answer-generation
+schema (see the note below on why this couldn't be an unconditional "yes"); a fixed valid closed
+question for write-back's compose-draft schema; and a type-conformant synthesized stub for
+anything else, so an unanticipated schema shape never crashes a test with a validation error.
+`FakeEmbeddingClient` returns a deterministic, hash-seeded 1024-dim vector per text (matching
+`Vector(1024)`) — reproducible, but explicitly not a claim of real semantic similarity.
+
+**Why the answer-generation fake had to make a real relevance judgment, not just "always
+confident, cite everything":** first implementation always returned `has_support: true`, citing
+every excerpt id found in the prompt. That broke `no_citable_source` entirely once
+`FakeEmbeddingClient` was in play — a fake (or real) embedding-based semantic search always
+returns its *closest* vector regardless of true relevance, the same way real cosine-distance
+ranking would for a genuinely unrelated question, so `hits` is never actually empty once the
+corpus is embedded. "A hit exists" stopped being able to stand in for "the excerpts answer this
+question." Fixed with a real (if simple) word-overlap check between the question and each
+excerpt's own text — an honest judgment, not a shortcut, matching this codebase's own "no
+fabricated placeholder" discipline applied to the fake's own behaviour.
+
+Verified locally before pushing, not assumed: the full `pnpm test:e2e` suite (25 specs, both repos,
+real Postgres/MinIO, `CUE_LLM_*_PROVIDER=fake` + `CUE_EMBED_PROVIDER=fake`) passes at CI's own
+actual concurrency (`--workers=2`, matching a 2-vCPU runner) in well under a minute, every Ask spec
+resolving in under a second — down from 17+ minutes and a real, reproducible failure with Ollama in
+the loop. `tests/test_fake_llm_client.py` (11 tests) and an extension to `tests/test_llm_factory.py`
+cover both fakes directly; full `uv run pytest` green at 524 passing (up from 513).
+
+Model *quality* — a genuinely different question from "does the wiring work" — still belongs in
+`backend/.github/workflows/cue-eval.yml`'s own separate, non-blocking evaluation workflow. Nothing
+about that changed; this correction only removed a real model from a place it should never have
+been running in the first place.
+
 ## Updating this file
 
 When a milestone completes:
