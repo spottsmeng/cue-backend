@@ -187,10 +187,13 @@ async def answer_query(
     # is simply never made for this request. See app/ask/intent.py's module
     # docstring for why this has to be a separate call, not an instruction
     # folded into the answer-generation prompt.
+    import time as _time  # DIAGNOSTIC — temporary, to be removed once CI's real per-call latency is measured
+    _t0 = _time.monotonic()
     intent = await classify_intent(
         question, reasoning_client,
         session=session, organisation_id=project.organisation_id, project_id=project.id,
     )
+    logger.warning("DIAGNOSTIC classify_intent took %.1fs", _time.monotonic() - _t0)
 
     if intent.is_action_request:
         result = AskAnswerOut(
@@ -220,7 +223,10 @@ async def answer_query(
             )
         else:
             prompt = _build_prompt(question, hits, prior_turns)
+            logger.warning("DIAGNOSTIC answer-generation prompt length: %d chars, %d hits", len(prompt), len(hits))
+            _t1 = _time.monotonic()
             raw, usage = await reasoning_client.complete(prompt, _ANSWER_SCHEMA)
+            logger.warning("DIAGNOSTIC answer generation took %.1fs", _time.monotonic() - _t1)
             await record_llm_usage(
                 session, organisation_id=project.organisation_id, project_id=project.id,
                 role="reasoning", purpose="ask_answer_generation", usage=usage,
