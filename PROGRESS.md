@@ -1686,6 +1686,45 @@ A third gap, same round, found while wiring the org-wide Delegations screen:
 
 `uv run pytest` green: 549 passing (up from 548). `pnpm generate:api` re-run; no other diff.
 
+### CI hardening, post-F7 (2026-08-11): two real, root-caused bugs, not flakiness
+
+Found by actually reading a failing GitHub Actions run's logs rather than assuming "CI is just
+flaky" — both reproduced locally once the same conditions were recreated, and both are fixed, not
+worked around:
+
+- **`backend/.github/workflows/pytest.yml` never set `CUE_LLM_*_PROVIDER`/`CUE_EMBED_PROVIDER`.**
+  `app/llm/config.py`'s `LLMSettings` defaults both provider roles to `"ollama"` when unset, so any
+  test exercising a real LLM call (FR-LED-05's `propose_supersession_candidates`, wired into
+  `create_commitment` since the post-F6 round) implicitly required a real Ollama this runner never
+  has, failing with `httpx.ConnectError: All connection attempts failed`. `FakeClient`/
+  `FakeEmbeddingClient` already exist and are schema-aware for this exact call (the "Architecture
+  correction" already applied to frontend's own Playwright CI job, post-F5) — just never wired into
+  this workflow. Fixed by adding the same three env vars that workflow already sets. Verified
+  locally with them set: 549 passing before the fix below, 551 after.
+- **`MinioStorageBackend.signed_url` never ensured the bucket exists — only `put` did**
+  (`app/documents/storage.py`). Invisible against a long-lived local MinIO (its named volume already
+  has the bucket from some earlier real upload), but a fresh/ephemeral MinIO — a CI run's own
+  `docker compose up -d --wait`, empty volume — 500s with `minio.error.S3Error: NoSuchBucket` the
+  instant anything resolves a signed URL before any real upload has happened. `scripts/
+  seed_dev_data.py`'s own two seeded `DocumentVersion` rows hit this exactly: their `storage_ref`
+  points at no real object *by design* (that script's own comment: "this fixture never exercises
+  download/approve on these two rows"), a call nobody anticipated when F5's Ask citation resolution
+  (`GET .../documents/versions/{id}` → `_to_version_out` → `signed_url`) was added later. Root-caused
+  by pulling and reading the actual failing frontend CI run's backend log artifact (a real
+  `minio.error.S3Error` traceback, not inferred), not assumed from "ask.spec.ts is flaky" — the
+  specific failing test differed run to run because whichever seeded-citation test happened to run
+  before `e2e/documents.spec.ts`'s own real-upload test (which incidentally creates the bucket as a
+  side effect) lost the race. Fixed by calling the same idempotent `_ensure_bucket_sync` check `put`
+  already makes. `tests/test_storage.py`, 2 new tests against the real MinIO — a signed URL against a
+  guaranteed-fresh, never-written-to bucket (name randomised so no earlier test/session's own bucket
+  can mask the bug), and the ordinary put-then-sign path stays correct. Confirmed the first test
+  actually catches the bug: reverted the fix, watched it fail with the identical `NoSuchBucket`
+  error, restored it, watched it pass.
+
+`uv run pytest` green: 551 passing (up from 549). Neither bug was caused by F7 — both reproduced
+identically on commits before it — but both were found while investigating F7's own first CI run, so
+recorded here rather than left as a mystery for whoever hits them next.
+
 ## Updating this file
 
 When a milestone completes:

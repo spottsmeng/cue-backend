@@ -73,6 +73,30 @@ class MinioStorageBackend:
     def signed_url(self, key: str, expires_seconds: int = 3600) -> str:
         from datetime import timedelta
 
+        # A real, root-caused bug (not flakiness) surfaced by a CI run
+        # against a fresh MinIO with an empty volume: `put()` is the only
+        # method that ever called `_ensure_bucket` — fine for a real
+        # upload, but `scripts/seed_dev_data.py` seeds two DocumentVersion
+        # rows with a `storage_ref` pointing at no real MinIO object at all
+        # (by design, its own comment says so — "this fixture never
+        # exercises download/approve on these two rows"). F5's Ask feature
+        # later added a code path that *does* touch these seeded rows'
+        # signed_url regardless (citation resolution, `GET .../documents/
+        # versions/{id}`), which nobody anticipated when that seed comment
+        # was written. Locally this was invisible — a long-lived dev MinIO
+        # container's named volume already has the bucket from a real
+        # upload some earlier session did — but a fresh/ephemeral MinIO
+        # (CI's own `docker compose up -d --wait`, no prior volume) 500s
+        # with `minio.error.S3Error: NoSuchBucket` the instant any test
+        # resolves a seeded document's citation before any real upload has
+        # happened to create the bucket first. `presigned_get_object`
+        # itself never checks the *object* exists (a wrong/expired key
+        # 404s only when the URL is actually fetched, the correct existing
+        # behaviour for a seeded fake storage_ref) — only the *bucket*
+        # needs to exist for signing to succeed at all, so ensuring it
+        # here, the same idempotent check `put()` already makes, is
+        # sufficient and doesn't hide a genuinely missing object.
+        self._ensure_bucket_sync()
         return self._client.presigned_get_object(
             self._bucket, key, expires=timedelta(seconds=expires_seconds)
         )
