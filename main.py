@@ -28,6 +28,7 @@ from app.api.reports import router as reports_router
 from app.api.retention import router as retention_router
 from app.api.risks import router as risks_router
 from app.api.twin import router as twin_router
+from app.api.users import router as users_router
 from app.api.webhooks import router as webhooks_router
 from app.api.writeback import router as writeback_router
 from app.core.config import get_settings
@@ -70,6 +71,7 @@ app.include_router(parties_router)
 app.include_router(party_organisation_router)
 app.include_router(identities_router)
 app.include_router(writeback_router)
+app.include_router(users_router)
 
 
 @app.get("/health")

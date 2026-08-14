@@ -420,6 +420,24 @@ class UserOut(BaseModel):
     updated_at: datetime
 
 
+class UserMeOut(BaseModel):
+    """`GET/PATCH /users/me` — F9's own per-user preference surface
+    (NFR-ACC-03). Deliberately not UserOut: this is "who am I and what are
+    my own settings," reachable by any authenticated user about themselves,
+    not the org-admin-gated directory listing."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: str
+    display_name: str | None
+    high_contrast: bool
+
+
+class UserPreferencesUpdate(BaseModel):
+    high_contrast: bool
+
+
 class BudgetOut(BaseModel):
     """PRD §4.3's Budget schema."""
 

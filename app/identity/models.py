@@ -46,6 +46,16 @@ class User(Base, UUIDPk, Timestamped):
     email: Mapped[str] = mapped_column()
     display_name: Mapped[str | None] = mapped_column(default=None)
     active: Mapped[bool] = mapped_column(default=True)
+    high_contrast: Mapped[bool] = mapped_column(
+        default=False,
+        server_default="false",
+        comment=(
+            "NFR-ACC-03's high-contrast mode preference — genuinely per-user "
+            "(follows a low-vision user across devices), unlike the frontend's "
+            "own theme toggle, which is a deliberate device-local localStorage "
+            "preference with no backend row (frontend/lib/store/ui-store.ts)."
+        ),
+    )
 
 
 class Membership(Base, UUIDPk):

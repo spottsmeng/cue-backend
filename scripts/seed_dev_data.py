@@ -312,6 +312,52 @@ async def main() -> None:
             )
         )
 
+        # Commitment 1b: a second, dedicated pending_verification monetary
+        # commitment for F9's own e2e/hardening.spec.ts keyboard-only PM
+        # flow. Not a reuse of `pending_commitment` above — a real, live
+        # cross-spec-file race found and fixed this session (F9's own
+        # PROGRESS.md notes have the full account): hardening.spec.ts
+        # genuinely verifies whatever commitment its own keyboard walk
+        # opens, and living-wip.spec.ts's own first test asserts
+        # `pending_commitment` specifically still reads "Pending
+        # verification" — under `fullyParallel` + multiple workers (this
+        # project's own CI concurrency, per F5's own notes), the two files'
+        # tests can interleave in either order. Same "give a new test its
+        # own fixture rather than share one another test's assertions
+        # depend on" precedent F6's own vendors.spec.ts already set (a
+        # second vendor, "Nimbus Event Staffing Pte Ltd") for the identical
+        # reason.
+        hardening_commitment = Commitment(
+            project_id=project_id, party_id=vendor.id, counterparty_id=internal.id,
+            act_type_id=act_term.id, state="committed",
+            deliverable_en="Stage power distribution board",
+            deliverable_original="舞台配电箱",
+            due_at=now + timedelta(days=12), amount=6200.00, currency="SGD",
+            confidence=0.9, field_confidence={"amount": 0.9, "due_at": 0.85},
+            verification_state="pending_verification",
+        )
+        session.add(hardening_commitment)
+        await session.flush()
+        hardening_message_text = "舞台配电箱确认,6200新元,十二天后到场"
+        hardening_message = Message(
+            project_id=project_id, channel_id=channel.id,
+            external_id=f"dev-seed-msg-{uuid.uuid4()}",
+            sender_external_id=vendor_phone, author_party_id=vendor.id,
+            sent_at=now, language="zh-Hans", text=hardening_message_text,
+            payload_hash=f"dev-seed-hash-{uuid.uuid4()}",
+        )
+        session.add(hardening_message)
+        await session.flush()
+        session.add(
+            Evidence(
+                commitment_id=hardening_commitment.id, message_id=hardening_message.id,
+                channel="whatsapp", sent_at=now, language="zh-Hans",
+                original_text=hardening_message_text,
+                translation="Confirmed — stage power distribution board, SGD 6,200, arriving in twelve days.",
+                span_start=0, span_end=len(hardening_message_text),
+            )
+        )
+
         # Commitment 2: already human_verified and on-plan, so vendor status/
         # next-steps sections show more than one row.
         verified_commitment = Commitment(

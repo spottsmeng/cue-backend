@@ -1725,6 +1725,45 @@ worked around:
 identically on commits before it — but both were found while investigating F7's own first CI run, so
 recorded here rather than left as a mystery for whoever hits them next.
 
+### Frontend-enablement addition, round 8 (during frontend F9, 2026-08-11)
+
+F9 (frontend Hardening) needed a genuinely new capability, not a resolver gap on an existing one:
+NFR-ACC-03's high-contrast mode has to be "persisted per-user, not just per-session" (the prompt's
+own wording, deliberately distinct from the frontend's existing theme toggle, a device-local
+`localStorage` preference with no backend row at all) — there was no per-user settings surface of
+any kind in this API before this round.
+
+- **`GET/PATCH /users/me`** (new `app/api/users.py`, `UserMeOut`/`UserPreferencesUpdate` in
+  `app/api/schemas.py`, `User.high_contrast` — migration `5d68b34f2fa8`). Both depend on the
+  existing `get_current_user` — no new auth plumbing needed, this is "who am I and what are my own
+  settings," reachable by any authenticated user about themselves, not the org-admin-gated `UserOut`
+  directory listing. `tests/test_users_me.py`, 4 tests (default value, flip-and-persist, no
+  cross-user leakage via a second real user, 401 unauthenticated).
+
+**A real bug in this round's own first implementation, found by a real e2e run against a real
+server, not caught by its own unit test.** `update_me` originally called `session.commit()` then
+`session.refresh(user)` — backwards. `app/core/db.py`'s own `get_session` docstring: `app.
+current_org_id` is set `is_local=true`, scoped to the request's *transaction*, specifically so it
+can't leak across a pooled connection into a different request; `commit()` ends that transaction, so
+a `refresh()` called *after* it runs its own SELECT with no RLS context at all and finds zero rows
+(`sqlalchemy.exc.InvalidRequestError: Could not refresh instance`). `app/api/milestones.py`'s
+`update_milestone` already established the correct order (flush, refresh, *then* commit) for exactly
+this reason — this endpoint just hadn't followed it, an oversight this round's own author made and
+caught themselves, not a pre-existing bug inherited from elsewhere. In the browser this surfaced as
+an opaque CORS failure (a 500 response carries no CORS headers here, and Chrome reports "blocked by
+CORS policy" for any cross-origin response missing them — the real 500 was only visible in the
+server's own log). Fixed by matching `update_milestone`'s own order.
+
+Worth naming plainly: **`tests/test_users_me.py`'s own in-process `ASGITransport` test never
+reproduced this bug at all**, before or after the fix — it kept passing throughout, on both the
+broken and the corrected version. Only a real e2e run against a real running `uvicorn` process (the
+frontend's own `e2e/hardening.spec.ts`) caught it, the same category of test-vs-real-server
+divergence this file's own M10 notes already document for a different fixture
+(`app_session` transaction-scoping flakiness) — recorded here as a second, independent instance of
+the same lesson, not assumed to be a one-off.
+
+`uv run pytest` green: 555 passing (up from 551).
+
 ## Updating this file
 
 When a milestone completes:
