@@ -2040,6 +2040,146 @@ would have raised at class-definition time.
 `uv run pytest` green: 581 passing (up from 577; 4 new tests, no regressions once the live-worker/
 test-suite race above was understood and controlled for).
 
+## Blind Spots: eight unwired-field gaps closed (2026-08-17)
+
+`CUE Blind Spots — Implementation Prompt.txt`'s own audit — a producer genuinely computes/records
+something, no screen/export/query anywhere ever reads it back — closed for all eight, in the
+prompt's own impact order. Every fix additive (a new call, a new column, a new response field);
+no producer logic touched, per that file's own explicit scope boundary.
+
+**1. Deviation event dispatch** (`app/foresight/deviation.py`). `dispatch_event(session,
+project=project, event_type="deviation", deviation=deviation)` added once inside `draft_deviation`
+(both real callers, `contradiction.py`/`forecast.py`, get it for free) and once each in
+`confirm_deviation`/`resolve_deviation`, which now take `project: Project` as a required keyword
+param threaded from `app/api/deviations.py`'s two endpoints (their sole callers already had it in
+scope — not re-fetched by `deviation.project_id`). `create_manual_deviation` deliberately left
+alone: the prompt's own fix-location bullets name only these three functions, and a PM's own
+immediately-`confirmed` manual entry has no one to notify that isn't the actor themselves.
+Tested end to end (`tests/test_deviations_api.py`): auto-draft, confirm-endpoint and
+resolve-endpoint each assert a real `Notification` row with `deviation_id` set and
+`_event_type_for_notification` resolving to `"deviation"`, reusing `authed_org_and_project`'s own
+administrator membership as the real fallback recipient (`default_recipients`'
+project_manager-or-administrator rule) rather than provisioning a redundant PM fixture.
+
+**2. Consent notice on real capture** (`app/capture/normalise.py`, `app/capture/identity.py`).
+Design decision, made explicitly rather than defaulted into: `IdentityResolution` now carries the
+resolved `Party` object (`party: Party | None`), populated only on the `created_new_identity=True`
+branches (steps 2/3 of `resolve_identity`, which already have the ORM object in hand from
+linking/minting it — free, no extra query) and left `None` on the common fast path (step 1, an
+identity that already existed), since nothing on that hot path needs it and fetching it there would
+cost a needless second query on every repeat sender's every message. `normalise_and_ingest` now
+calls `post_consent_notice` when `resolution.created_new_identity` is true, after the opt-out gate
+(so an already-opted-out party linked via a new identity is never sent a notice) and before the
+`Message` insert. Wrapped in `session.begin_nested()` (mirrors `app/llm/cost.py`'s
+`record_llm_usage` SAVEPOINT pattern) — a plain try/except around the call was not enough on its
+own, since a failed `flush()` inside `upsert_consent_record` would otherwise leave the *outer*
+transaction unusable for the `Message` insert that follows, defeating NFR-AVL-02 worse than not
+catching at all. `NotImplementedError` (a file_storage-capability channel with no `send()` concept)
+logs at `info`; anything else logs at `warning`; neither aborts ingestion.
+Tested (`tests/test_capture_normalise.py`): a genuinely new party ingested through
+`normalise_and_ingest` leaves a real `ConsentRecord` in `pending` state with `notice_sent_at` set;
+a second message from the same, now-known sender does not create a second record.
+
+**3. `WritebackAuditLog`/`DocumentAuditLog` via `_export_bundle`** (`app/api/admin.py`). Two new
+keys, same `_row(obj, fields)` shape as `audit_log` immediately above them — `document_audit_log`
+(`id, project_id, document_id, document_version_id, action, actor_id, occurred_at, detail`) and
+`writeback_audit_log` (`id, project_id, action, actor_id, occurred_at, detail`). Also added
+`audit_log.detail` and `evidence.transcript_confidence` to that same function's existing field
+lists (both real columns simply absent from these hand-written lists). Tested
+(`tests/test_admin_api.py`): a real document upload (two real `DocumentAuditLog` rows,
+`document_created`/`version_created`, with real `detail`) and a real `PATCH .../writeback/config`
+call (one real `WritebackAuditLog` row with `detail={"before": 1, "after": 25}`) both come back
+through `GET /admin/export/{project_id}`, JSON and CSV.
+
+**4. `SpecClaim.confidence`** (`app/documents/models.py`, `app/documents/extractor.py`,
+`app/api/schemas.py`, `app/api/documents.py`). Schema-constraint reading, stated explicitly per the
+prompt's own instruction: `SpecClaim`'s docstring "do not add or rename fields" is about §4.3's own
+claim-*content* schema (Location/Description/Dimension/Finishing/Qty/Status — i.e. `attribute`/
+`value`/`location_code`), not extraction metadata about the claim — the same carve-out
+`Commitment.confidence` already relies on without touching Commitment's own §4.2 field set. Read it
+that way; added `confidence: float | None`, nullable (no existing row has one to backfill), via
+`alembic/versions/06ed0141ee07_add_spec_claim_confidence.py` (mirrors `f3f332c90366`'s style — the
+most recent additive-column migration at the time). Wired through `extract_spec_claims`
+(`item.confidence` was already being extracted, just never persisted), exposed on `SpecClaimOut`
+(inherited by `SpecClaimResolvedOut` automatically). Tested: `tests/test_document_extractor.py`
+asserts the persisted row's `confidence` matches the fake extraction client's own canned value;
+`tests/test_documents_api.py` asserts a real `GET .../spec-claims` response round-trips it.
+
+**5. `Evidence.transcript_confidence` in `EvidenceOut`** (`app/api/schemas.py`). Same shape as
+`media_ref` immediately above it in that class — column existed since M8's voice-note pipeline, no
+schema ever exposed it. Tested by extending `tests/test_frontend_enablement_f1.py`'s own
+`media_ref` round-trip tests (both the populated and the null case) to assert this field too, rather
+than inventing a new test.
+
+**6. `Message.identity_confidence`/`identity_manually_verified` in `MessageOut`**
+(`app/api/schemas.py`). Straightforward additive fields — `MessageOut` already reads via
+`from_attributes=True` off the real ORM row, so no endpoint code changed. Explicit decision on the
+review-surface question the prompt asked to be answered, not defaulted: **no dedicated filter/sort
+endpoint added this round** — exposing the raw fields is sufficient for now. A real "review a
+low-confidence match" workflow (who reviews it, what correcting it even means beyond
+`set_manual_identity_override`, which already exists) is a product-scoped feature in its own right,
+not a natural extension of an additive schema-field task, and every one of this file's items is
+scoped as "make the data retrievable," not "build a workflow around it." Tested by extending
+`tests/test_channels_api.py`'s existing real-capture debug-console test to assert both fields on
+every message (`1.0`/`False` — the real capture path never passes `display_name` to
+`resolve_identity`, so the 0.6 display-name-match branch never fires for real capture; only manual
+`set_manual_identity_override` corrections would produce a different value).
+
+**7. `DecisionLogRow.detail` end to end** (`app/reports/schema.py`, `app/reports/composer.py`,
+`app/ask/brief.py`). `AuditLog.detail` already had a real consumer (`app/ask/embed_worker.py`'s
+`_audit_log_text`, for Ask's semantic search) — the actual gap was narrower: the Decision Log
+report section and the Successor Brief never read it. Added `detail: dict` to `DecisionLogRow`,
+populated from `a.detail` in both builders. **A fourth, real construction site the prompt's own
+"three call sites" framing missed, found and fixed in the same pass rather than left to break at
+runtime**: `app/ask/summarise.py`'s `_decision_log_row` (feeds `compose_period_digest`, Ask's
+Period Digest) builds the same `DecisionLogRow` and would have raised a `ValidationError` the
+moment `detail` became a required field with no default — fixed the same way, which also closes
+this same gap for the Period Digest as a side effect. Tested: `tests/test_reports_api.py` drives a
+real commitment correction through `POST .../verify` and asserts the same `{"changes": {...}}`
+diff appears in `GET .../report/current`'s decision log; `tests/test_ask_brief.py` extends its
+existing full-section test to assert the same diff reaches `compose_successor_brief`'s
+`decision_history`.
+
+`uv run pytest` green: **591 passing** (583 immediately prior to this round + 8 new tests across
+these seven items, no regressions — items 3 and 4 in the prompt's own audit numbering share one
+build step above, "3," per its own "share one natural fix location" note, hence seven build steps
+covering eight named gaps).
+
+## Blind Spots item 3, real UX follow-up: a document-scoped Activity endpoint (2026-08-17)
+
+Validating the Blind Spots round above against the real product (not just `uv run pytest`) surfaced
+a legitimate frontend gap on item 3's document half: `DocumentAuditLog` was reachable only through
+`/admin/export`'s whole-project, org-admin-only bundle — correct per FR-ADM-10, but no business user
+could see "what happened to this document" without downloading a JSON/CSV file and searching it by
+hand. Decided (with the user) to add a real, human-readable Activity view scoped to one document
+(`frontend/PROGRESS.md`'s matching entry has the frontend half and the full reasoning for that
+scope choice over a project-wide activity page) — `WritebackAuditLog` deliberately left export-only
+for this round, per that same decision.
+
+**`GET /projects/{project_id}/documents/{document_id}/audit-log`** (`app/api/documents.py`) — new
+`DocumentAuditLogOut` schema (`app/api/schemas.py`), same read tier as `/lineage` immediately above
+it (`Depends(get_project)`, any project member — this is "my own document's history," not an admin
+action). Filters to `document_id == this document`, which naturally excludes `project_archived` rows
+(`document_id` NULL, a project-wide fact) — deliberately out of scope for a document-scoped view.
+Most-recent-first.
+
+**A real, honest limitation named rather than glossed over**: `document_created` and `version_created`
+are written in the *same* upload transaction (`documents_service.create_document`), and Postgres's
+`now()` is fixed for the whole transaction, not re-evaluated per statement — both rows land on the
+identical `occurred_at`, so their relative order in a strict `ORDER BY occurred_at DESC` is genuinely
+undefined (confirmed by a real test failure, not assumed: the first draft of the test below asserted
+a strict total order and failed non-deterministically). Documented on the endpoint's own docstring;
+the test asserts only what's actually guaranteed (the two genuinely-separate-transaction events sort
+correctly; the same-transaction pair is asserted as a set, not an order).
+
+**Tested for real** (`tests/test_documents_api.py`): a document taken through upload → approve →
+tag returns four real rows with real `detail` values (`version_no`, `sharepoint_write_back`,
+`changes`) in the guaranteed-correct partial order; a freshly-uploaded, untouched document never
+returns empty (`document_created`/`version_created` always exist — a document with no history can't
+exist).
+
+`uv run pytest` green: **593 passing** (up from 591; 2 new tests, no regressions).
+
 ## Updating this file
 
 When a milestone completes:

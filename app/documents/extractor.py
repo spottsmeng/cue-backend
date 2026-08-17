@@ -101,6 +101,7 @@ async def extract_spec_claims(
             location_code=item.location_code,
             attribute=item.attribute,
             value=item.value,
+            confidence=item.confidence,
         )
         session.add(claim)
         await session.flush()  # need claim.id for the evidence row below

@@ -32,9 +32,11 @@ from app.api.schemas import (
     UserOut,
 )
 from app.core.db import get_session
+from app.documents.models import DocumentAuditLog
 from app.identity.models import Delegation, Membership, User
 from app.llm.models import LLMUsageEvent
 from app.models import AuditLog, Budget, Commitment, Evidence, Project
+from app.writeback.models import WritebackAuditLog
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -157,8 +159,10 @@ async def _get_org_project(session: AsyncSession, project_id: uuid.UUID) -> Proj
 
 async def _export_bundle(session: AsyncSession, project: Project) -> dict[str, list[dict]]:
     """FR-ADM-10: 'export a complete project record (ledger, documents,
-    audit)'. Documents skipped this session — that milestone doesn't exist
-    yet, per Prompt 5's own scope note."""
+    audit)'. `document_audit_log`/`writeback_audit_log` close the "Documents
+    skipped this session" gap this docstring used to admit by name — that
+    scope note predates the Documents (Prompt 6) and Write-back (Prompt 12)
+    milestones existing at all."""
     commitments = (
         (await session.execute(select(Commitment).where(Commitment.project_id == project.id)))
         .scalars()
@@ -185,6 +189,28 @@ async def _export_bundle(session: AsyncSession, project: Project) -> dict[str, l
         (
             await session.execute(
                 select(AuditLog).where(AuditLog.project_id == project.id).order_by(AuditLog.occurred_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    document_audit_log = (
+        (
+            await session.execute(
+                select(DocumentAuditLog)
+                .where(DocumentAuditLog.project_id == project.id)
+                .order_by(DocumentAuditLog.occurred_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    writeback_audit_log = (
+        (
+            await session.execute(
+                select(WritebackAuditLog)
+                .where(WritebackAuditLog.project_id == project.id)
+                .order_by(WritebackAuditLog.occurred_at)
             )
         )
         .scalars()
@@ -221,7 +247,7 @@ async def _export_bundle(session: AsyncSession, project: Project) -> dict[str, l
                 e,
                 [
                     "id", "commitment_id", "budget_id", "channel", "sent_at", "language",
-                    "original_text", "translation", "span_start", "span_end",
+                    "original_text", "translation", "span_start", "span_end", "transcript_confidence",
                 ],
             )
             for e in evidence
@@ -241,10 +267,24 @@ async def _export_bundle(session: AsyncSession, project: Project) -> dict[str, l
                 a,
                 [
                     "id", "project_id", "commitment_id", "action", "actor_id", "occurred_at",
-                    "from_state", "to_state", "evidence_id",
+                    "from_state", "to_state", "evidence_id", "detail",
                 ],
             )
             for a in audit_log
+        ],
+        "document_audit_log": [
+            _row(
+                a,
+                [
+                    "id", "project_id", "document_id", "document_version_id", "action", "actor_id",
+                    "occurred_at", "detail",
+                ],
+            )
+            for a in document_audit_log
+        ],
+        "writeback_audit_log": [
+            _row(a, ["id", "project_id", "action", "actor_id", "occurred_at", "detail"])
+            for a in writeback_audit_log
         ],
     }
 

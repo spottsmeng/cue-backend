@@ -48,6 +48,16 @@ class IdentityResolution:
     manually_verified: bool
     created_new_identity: bool
     created_new_party: bool
+    # The resolved Party ORM object, populated only when
+    # created_new_identity is True (steps 2/3 below already have it in hand
+    # from linking/minting it — attaching it here costs no extra query).
+    # None on the common fast path (step 1, an identity that already
+    # existed) — deliberately not fetched there, since that's the hot path
+    # for every repeat sender and nothing currently calling resolve_identity
+    # needs the Party object for an already-resolved identity. A caller that
+    # ever does can fetch it by party_id itself; that's a second query only
+    # on a path that doesn't run on every message.
+    party: Party | None = None
 
 
 async def resolve_identity(
@@ -90,6 +100,7 @@ async def resolve_identity(
             manually_verified=existing_identity.manually_verified,
             created_new_identity=False,
             created_new_party=False,
+            party=None,
         )
 
     party: Party | None = None
@@ -132,6 +143,7 @@ async def resolve_identity(
         manually_verified=False,
         created_new_identity=True,
         created_new_party=created_new_party,
+        party=party,
     )
 
 

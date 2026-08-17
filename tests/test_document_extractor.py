@@ -119,6 +119,10 @@ async def test_valid_extraction_writes_spec_claim_and_evidence(
     assert claim.location_code == "H"
     assert claim.attribute == "dimension"
     assert claim.value == "2040mm x 1040mm"
+    # Blind Spots item 4: the extraction model's own confidence (the fake
+    # client's canned 0.92 above) must actually reach the persisted row —
+    # it used to be dropped on the floor between the schema and the model.
+    assert claim.confidence == 0.92
 
     evidence = (
         await owner_session.execute(select(Evidence).where(Evidence.spec_claim_id == claim.id))

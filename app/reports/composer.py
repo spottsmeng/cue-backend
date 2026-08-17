@@ -423,6 +423,7 @@ async def _compose_decision_and_approval_log(
                 occurred_at=a.occurred_at,
                 from_state=a.from_state,
                 to_state=a.to_state,
+                detail=a.detail,
                 provenance=ReportProvenance(source_type="audit_log", source_id=a.id),
             )
             for a in audit_rows

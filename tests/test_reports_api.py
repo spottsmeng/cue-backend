@@ -524,6 +524,52 @@ async def test_current_report_risk_and_issues_includes_risks_and_deviations(
         assert key in body
 
 
+@pytest.mark.asyncio
+async def test_decision_log_includes_the_real_correction_detail(
+    app_session, authed_org_and_project, parties
+):
+    """Blind Spots item 7: a commitment correction writes a real before/
+    after `changes` diff to AuditLog.detail (app/api/commitments.py's
+    verify_commitment) — DecisionLogRow never had anywhere to put it. Same
+    detail must show up in the Decision Log report section."""
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+    vendor, internal = parties
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await client.post(
+            f"/projects/{project_id}/commitments",
+            headers=_headers(admin_token),
+            json={
+                "party_id": str(vendor.id),
+                "counterparty_id": str(internal.id),
+                "act_type": "commit",
+                "deliverable_en": "LED screen install",
+            },
+        )
+        assert created.status_code == 201, created.text
+        commitment_id = created.json()["id"]
+
+        verified = await client.post(
+            f"/projects/{project_id}/commitments/{commitment_id}/verify",
+            headers=_headers(admin_token),
+            json={"corrections": {"deliverable_en": "LED wall install"}},
+        )
+        assert verified.status_code == 200, verified.text
+
+        current = await client.get(
+            f"/projects/{project_id}/report/current", headers=_headers(admin_token)
+        )
+
+    assert current.status_code == 200, current.text
+    decisions = current.json()["decision_and_approval_log"]["decisions"]
+    corrected = next(d for d in decisions if d["commitment_id"] == commitment_id)
+    assert corrected["action"] == "corrected"
+    assert corrected["detail"] == {
+        "changes": {"deliverable_en": {"before": "LED screen install", "after": "LED wall install"}}
+    }
+
+
 # --- FR-RPT-09/10: schedule config surface --------------------------------
 
 

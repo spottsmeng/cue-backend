@@ -138,7 +138,7 @@ async def confirm_deviation_endpoint(
     deviation = await _get_deviation(session, project, deviation_id)
     corrections = {"description_en": body.description_en} if body.description_en is not None else None
     deviation = await confirm_deviation(
-        session, deviation=deviation, actor_id=actor_id, corrections=corrections
+        session, project=project, deviation=deviation, actor_id=actor_id, corrections=corrections
     )
     await session.commit()
     return await _to_out(session, deviation)
@@ -158,6 +158,7 @@ async def resolve_deviation_endpoint(
         raise HTTPException(status_code=409, detail="deviation is already resolved")
     deviation = await resolve_deviation(
         session,
+        project=project,
         deviation=deviation,
         actor_id=actor_id,
         resolution_date=body.resolution_date,

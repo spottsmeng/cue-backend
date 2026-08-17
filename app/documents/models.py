@@ -196,6 +196,15 @@ class SpecClaim(Base, UUIDPk):
     contradicts: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("spec_claims.id"), default=None
     )
+    # Not a §4.3 domain field (this docstring's own "do not add or rename
+    # fields" is about that schema — Location/Description/Dimension/
+    # Finishing/Qty/Status, i.e. attribute/value/location_code above), same
+    # extraction-metadata carve-out Commitment.confidence already relies on
+    # without touching Commitment's own §4.2 field set. The model already
+    # returns this per claim (app/documents/schema.py's ExtractedSpecClaim,
+    # app/documents/extractor.py's build_prompt) — it was simply never
+    # persisted.
+    confidence: Mapped[float | None] = mapped_column(default=None)
 
 
 DocumentAuditAction = Enum(

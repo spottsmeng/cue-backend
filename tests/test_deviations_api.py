@@ -11,7 +11,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.foresight.deviation import draft_deviation
-from app.foresight.models import Deviation
+from app.foresight.models import Deviation, Notification
+from app.foresight.notification import _event_type_for_notification
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
 from app.models import Project
@@ -147,6 +148,87 @@ async def test_resolve_deviation_sets_date_and_owner(app_session, authed_org_and
             json={"resolution_date": resolution_date, "resolution_owner": str(user.id)},
         )
     assert again.status_code == 409
+
+
+
+# --- Blind Spots item 1: deviation event dispatch --------------------------
+# Each of the four paths a Deviation can be created/mutated through
+# (draft_deviation's own auto-draft — the fix point shared by both real
+# call sites, contradiction.py and forecast.py — plus the confirm and
+# resolve endpoints) must leave behind a real Notification row naming this
+# deviation, not just a status change with nothing downstream ever reading
+# it. authed_org_and_project's own "administrator" membership is exactly
+# the fallback recipient default_recipients (app/foresight/notification.py)
+# resolves to when no project_manager exists yet, so no extra membership
+# fixture is needed to get a real recipient.
+
+
+@pytest.mark.asyncio
+async def test_draft_deviation_dispatches_a_notification(app_session, authed_org_and_project):
+    org_id, project_id, user, _token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+    deviation = await _make_auto_drafted_deviation(app_session, project_id)
+
+    notifications = (
+        await app_session.execute(
+            select(Notification).where(Notification.project_id == project_id)
+        )
+    ).scalars().all()
+    assert len(notifications) == 1
+    assert notifications[0].deviation_id == deviation.id
+    assert notifications[0].recipient_id == user.id
+    assert _event_type_for_notification(notifications[0]) == "deviation"
+
+
+@pytest.mark.asyncio
+async def test_confirm_deviation_endpoint_dispatches_a_notification(app_session, authed_org_and_project):
+    org_id, project_id, user, token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+    deviation = await _make_auto_drafted_deviation(app_session, project_id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/projects/{project_id}/deviations/{deviation.id}/confirm", headers=_headers(token), json={}
+        )
+    assert response.status_code == 200, response.text
+
+    notification = (
+        await app_session.execute(
+            select(Notification).where(
+                Notification.project_id == project_id, Notification.deviation_id == deviation.id
+            )
+        )
+    ).scalar_one()
+    assert notification.recipient_id == user.id
+    assert _event_type_for_notification(notification) == "deviation"
+
+
+@pytest.mark.asyncio
+async def test_resolve_deviation_endpoint_dispatches_a_notification(app_session, authed_org_and_project):
+    org_id, project_id, user, token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+    deviation = await _make_auto_drafted_deviation(app_session, project_id)
+    resolution_date = datetime.now(timezone.utc).isoformat()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            f"/projects/{project_id}/deviations/{deviation.id}/resolve",
+            headers=_headers(token),
+            json={"resolution_date": resolution_date, "resolution_owner": str(user.id)},
+        )
+    assert response.status_code == 200, response.text
+
+    notification = (
+        await app_session.execute(
+            select(Notification).where(
+                Notification.project_id == project_id, Notification.deviation_id == deviation.id
+            )
+        )
+    ).scalar_one()
+    assert notification.recipient_id == user.id
+    assert _event_type_for_notification(notification) == "deviation"
 
 
 @pytest.mark.asyncio

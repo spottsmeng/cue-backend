@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_actor_id, get_project, require_project_role
 from app.api.schemas import (
+    DocumentAuditLogOut,
     DocumentLineageOut,
     DocumentOut,
     DocumentSearchResult,
@@ -20,7 +21,7 @@ from app.api.schemas import (
 from app.core.db import get_session
 from app.documents import service as documents_service
 from app.documents.extractor import RejectedSpecClaim, extract_spec_claims
-from app.documents.models import Document, DocumentVersion, SpecClaim
+from app.documents.models import Document, DocumentAuditLog, DocumentVersion, SpecClaim
 from app.documents.sharepoint import SharePointAdapter, get_sharepoint_adapter
 from app.documents.storage import StorageBackend, get_storage_backend
 from app.identity.service import WRITE_ROLES
@@ -89,6 +90,7 @@ async def _to_spec_claim_out(session: AsyncSession, claim: SpecClaim) -> SpecCla
         attribute=claim.attribute,
         value=claim.value,
         contradicts=claim.contradicts,
+        confidence=claim.confidence,
         evidence=[EvidenceOut.model_validate(e) for e in evidence_rows],
     )
 
@@ -276,6 +278,39 @@ async def read_lineage(
         current_version_id=document.current_version_id,
         versions=[_to_version_out(v, document, storage) for v in versions],
     )
+
+
+@router.get("/{document_id}/audit-log", response_model=list[DocumentAuditLogOut])
+async def read_document_audit_log(
+    document_id: uuid.UUID,
+    project: Annotated[Project, Depends(get_project)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[DocumentAuditLog]:
+    """The Documents page's own Activity tab — this document's real
+    `DocumentAuditLog` trail, most-recent-first (the same reverse-
+    chronological convention deviations/notifications already read in).
+    Previously reachable only through `/admin/export`'s whole-project,
+    org-admin-only bundle; any project member can read their own document's
+    activity here, same read tier as `/lineage` immediately above.
+    `project_archived` rows (document_id NULL, a project-wide fact, not any
+    one document's) never match this filter — deliberately out of scope for
+    a document-scoped view.
+
+    Two rows written in the same request (e.g. `create_document`'s
+    `document_created` immediately followed by `version_created`) can share
+    the identical `occurred_at` — Postgres's `now()` is fixed for the whole
+    transaction, not re-evaluated per statement — so their relative order
+    is genuinely undefined, not something this endpoint claims to resolve;
+    ordering is only meaningful across genuinely separate requests."""
+    document = await _get_document(session, project, document_id)
+    rows = (
+        await session.execute(
+            select(DocumentAuditLog)
+            .where(DocumentAuditLog.document_id == document.id)
+            .order_by(DocumentAuditLog.occurred_at.desc())
+        )
+    ).scalars().all()
+    return list(rows)
 
 
 @router.post("", response_model=DocumentOut, status_code=201)

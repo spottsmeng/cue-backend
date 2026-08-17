@@ -457,6 +457,13 @@ async def test_list_channel_messages_returns_real_captured_rows_in_order(authed_
     # A real fixture case's text/sender, not a placeholder.
     assert all(m["text"] for m in messages)
     assert all(m["sender_external_id"] for m in messages)
+    # Blind Spots item 6: FR-NRM-03's own resolved-identity confidence
+    # (app/capture/identity.py's resolve_identity), set on every real
+    # captured Message since M8 but never exposed by this debug view until
+    # now — every fixture sender here is brand-new, so full confidence,
+    # not manually verified.
+    assert all(m["identity_confidence"] == 1.0 for m in messages)
+    assert all(m["identity_manually_verified"] is False for m in messages)
 
 
 @pytest.mark.asyncio

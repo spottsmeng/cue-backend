@@ -46,6 +46,7 @@ async def test_successor_brief_populates_every_section(
     await record_audit_event(
         app_session, project_id=project_id, commitment_id=commitment.id, action="state_transition",
         actor_id=seeded_user.id, from_state="proposed", to_state="committed",
+        detail={"changes": {"deliverable_en": {"before": "LED screen", "after": "LED screen install"}}},
     )
     await app_session.commit()
 
@@ -93,6 +94,13 @@ async def test_successor_brief_populates_every_section(
     assert brief.project_id == project.id
     assert [c.commitment_id for c in brief.open_commitments] == [commitment.id]
     assert any(d.action == "state_transition" for d in brief.decision_history)
+    # Blind Spots item 7: the same real AuditLog.detail diff a correction
+    # writes must reach the Successor Brief's own decision history, not
+    # just the Decision Log report section.
+    transition = next(d for d in brief.decision_history if d.action == "state_transition")
+    assert transition.detail == {
+        "changes": {"deliverable_en": {"before": "LED screen", "after": "LED screen install"}}
+    }
     assert [r.severity for r in brief.risks] == ["high"]
     assert [d.document_id for d in brief.key_documents] == [document.id]
     assert brief.key_documents[0].approved is True

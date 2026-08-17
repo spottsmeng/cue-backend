@@ -132,7 +132,7 @@ async def compose_vendor_status(session: AsyncSession, project: Project) -> AskV
 def _decision_log_row(a: AuditLog) -> DecisionLogRow:
     return DecisionLogRow(
         audit_log_id=a.id, commitment_id=a.commitment_id, action=a.action, actor_id=a.actor_id,
-        occurred_at=a.occurred_at, from_state=a.from_state, to_state=a.to_state,
+        occurred_at=a.occurred_at, from_state=a.from_state, to_state=a.to_state, detail=a.detail,
         provenance=ReportProvenance(source_type="audit_log", source_id=a.id),
     )
 

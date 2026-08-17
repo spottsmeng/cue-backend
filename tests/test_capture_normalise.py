@@ -12,7 +12,7 @@ from app.capture.consent import upsert_consent_record
 from app.capture.models import Message, MessageMedia
 from app.capture.normalise import detect_language, normalise_and_ingest
 from app.capture.schema import RawCapturedMedia, RawCapturedMessage, compute_payload_hash
-from app.models import Channel, Party, Project
+from app.models import Channel, ConsentRecord, Party, Project
 from tests.conftest import set_org_context
 
 
@@ -66,6 +66,62 @@ async def test_ingest_creates_message_and_resolves_identity(app_session, org_and
     assert message.author_party_id is not None
     assert message.identity_confidence == 1.0
     assert message.payload_hash == raw.raw_payload_hash
+
+
+@pytest.mark.asyncio
+async def test_ingest_from_a_new_party_posts_a_one_time_consent_notice(app_session, org_and_project):
+    """Item 2 (Blind Spots): a genuinely new identity (resolve_identity's
+    own created_new_identity=True) must post FR-CAP-06's bilingual consent
+    notice and write a real, pending ConsentRecord — not just resolve an
+    identity silently."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    project = (await app_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    channel = Channel(project_id=project_id, type="whatsapp", external_ref="g1", healthy=True)
+    app_session.add(channel)
+    await app_session.commit()
+
+    raw = _raw("whatsapp", "msg-1", "+6591112222", "Hi, this is the new site contact.")
+    result = await normalise_and_ingest(app_session, project=project, channel=channel, raw=raw)
+    await app_session.commit()
+
+    assert result.is_new is True
+    party_id = result.message.author_party_id
+    record = (
+        await app_session.execute(select(ConsentRecord).where(ConsentRecord.party_id == party_id))
+    ).scalar_one()
+    assert record.status == "pending"
+    assert record.notice_sent_at is not None
+    assert record.project_id == project_id
+
+
+@pytest.mark.asyncio
+async def test_ingest_from_an_already_known_party_does_not_repost_consent(app_session, org_and_project):
+    """post_consent_notice's own 'one-time' contract — a second message
+    from the same, already-resolved sender must not create a second
+    ConsentRecord write attempt (created_new_identity is False on repeat
+    senders, per app/capture/identity.py's resolve_identity)."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    project = (await app_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    channel = Channel(project_id=project_id, type="whatsapp", external_ref="g1", healthy=True)
+    app_session.add(channel)
+    await app_session.commit()
+
+    raw1 = _raw("whatsapp", "msg-1", "+6591112222", "First message.")
+    first = await normalise_and_ingest(app_session, project=project, channel=channel, raw=raw1)
+    await app_session.commit()
+
+    raw2 = _raw("whatsapp", "msg-2", "+6591112222", "Second message, same sender.")
+    await normalise_and_ingest(app_session, project=project, channel=channel, raw=raw2)
+    await app_session.commit()
+
+    records = (
+        await app_session.execute(
+            select(ConsentRecord).where(ConsentRecord.party_id == first.message.author_party_id)
+        )
+    ).scalars().all()
+    assert len(records) == 1
 
 
 @pytest.mark.asyncio

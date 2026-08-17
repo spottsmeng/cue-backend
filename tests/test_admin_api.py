@@ -268,8 +268,12 @@ async def test_export_project_json_bundle(authed_org_and_project, parties):
     assert len(body["commitments"]) == 1
     assert body["commitments"][0]["deliverable_en"] == "LED screen install"
     assert len(body["evidence"]) == 1
+    assert body["evidence"][0]["transcript_confidence"] is None  # text-only evidence, no voice note
     assert len(body["audit_log"]) == 1  # the "created" action from commitment creation
+    assert body["audit_log"][0]["detail"] == {}
     assert body["budgets"] == []
+    assert body["document_audit_log"] == []
+    assert body["writeback_audit_log"] == []
 
 
 @pytest.mark.asyncio
@@ -297,11 +301,59 @@ async def test_export_project_csv_bundle(authed_org_and_project, parties):
     assert response.headers["content-type"] == "application/zip"
     archive = zipfile.ZipFile(io.BytesIO(response.content))
     names = set(archive.namelist())
-    assert {"project.csv", "commitments.csv", "evidence.csv", "budgets.csv", "audit_log.csv"} <= names
+    assert {
+        "project.csv", "commitments.csv", "evidence.csv", "budgets.csv", "audit_log.csv",
+        "document_audit_log.csv", "writeback_audit_log.csv",
+    } <= names
 
     commitments_csv = list(csv.DictReader(io.StringIO(archive.read("commitments.csv").decode())))
     assert len(commitments_csv) == 1
     assert commitments_csv[0]["deliverable_en"] == "LED screen install"
+
+
+@pytest.mark.asyncio
+async def test_export_project_includes_document_and_writeback_audit_logs(authed_org_and_project):
+    """Blind Spots item 3: a document lifecycle action and a writeback
+    config change each write to their own domain's real audit table
+    (DocumentAuditLog, WritebackAuditLog) — this asserts both now come back
+    through the same export bundle FR-ADM-10 already promises "a complete
+    project record" from, with real values, not just a 200."""
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        upload = await client.post(
+            f"/projects/{project_id}/documents",
+            headers=_headers(admin_token),
+            data={"name": "Booth floor plan", "extracted_text": "Location H: 2040mm x 1040mm."},
+            files={"file": ("floor-plan.pdf", b"%PDF-1.4 fake bytes", "application/pdf")},
+        )
+        assert upload.status_code == 201, upload.text
+        document_id = upload.json()["id"]
+
+        config = await client.patch(
+            f"/projects/{project_id}/writeback/config",
+            headers=_headers(admin_token),
+            json={"daily_ceiling": 25},
+        )
+        assert config.status_code == 200, config.text
+
+        response = await client.get(f"/admin/export/{project_id}", headers=_headers(admin_token))
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    doc_rows = body["document_audit_log"]
+    assert {r["action"] for r in doc_rows} == {"document_created", "version_created"}
+    assert all(r["document_id"] == document_id for r in doc_rows)
+    version_row = next(r for r in doc_rows if r["action"] == "version_created")
+    assert version_row["detail"]["version_no"] == 1
+
+    wb_rows = body["writeback_audit_log"]
+    assert len(wb_rows) == 1
+    assert wb_rows[0]["action"] == "config_updated"
+    assert wb_rows[0]["detail"] == {"before": 1, "after": 25}
+    assert wb_rows[0]["project_id"] == str(project_id)
 
 
 @pytest.mark.asyncio

@@ -65,6 +65,7 @@ async def test_evidence_out_exposes_media_ref(authed_org_and_project, app_sessio
             )
         ).scalar_one()
         evidence.media_ref = "https://storage.example.test/signed/voice-note.ogg?exp=123"
+        evidence.transcript_confidence = 0.87
         await app_session.commit()
 
         read_resp = await client.get(
@@ -73,6 +74,9 @@ async def test_evidence_out_exposes_media_ref(authed_org_and_project, app_sessio
     assert read_resp.status_code == 200
     evidence_out = read_resp.json()["evidence"][0]
     assert evidence_out["media_ref"] == "https://storage.example.test/signed/voice-note.ogg?exp=123"
+    # Blind Spots item 5 — the same "column existed, no schema exposed it"
+    # gap as media_ref immediately above it on this same model/schema.
+    assert evidence_out["transcript_confidence"] == 0.87
 
 
 @pytest.mark.asyncio
@@ -93,6 +97,7 @@ async def test_evidence_out_media_ref_null_when_absent(authed_org_and_project, p
         )
     assert create_resp.status_code == 201, create_resp.text
     assert create_resp.json()["evidence"][0]["media_ref"] is None
+    assert create_resp.json()["evidence"][0]["transcript_confidence"] is None
 
 
 @pytest.mark.asyncio

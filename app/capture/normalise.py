@@ -12,6 +12,7 @@ is the one deliberate exception to that rule (an opted-out participant's
 message is not stored at all, by explicit product requirement).
 """
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -20,11 +21,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.capture.consent import is_opted_out
+from app.capture.consent import is_opted_out, post_consent_notice
 from app.capture.identity import resolve_identity
 from app.capture.models import Message, MessageMedia
 from app.capture.schema import RawCapturedMessage
 from app.models import Channel, Project
+
+logger = logging.getLogger("cue.capture.normalise")
 
 # FR-NRM-02: "Detect message language per message, including mixed-language
 # and code-switched content." A Unicode-script-ratio heuristic, not a
@@ -117,6 +120,36 @@ async def normalise_and_ingest(
 
     if await is_opted_out(session, party_id=resolution.party_id, project_id=project.id):
         return IngestResult(message=None, is_new=False, opted_out=True)
+
+    # FR-CAP-06's "one-time" notice — only on a genuinely new identity
+    # (resolution.created_new_identity, per post_consent_notice's own
+    # docstring), never on every message from a sender already known.
+    # NFR-AVL-02 ("capture must never lose a message") means a failure here
+    # must never abort, and must never poison, ingestion of the message
+    # that triggered it — same SAVEPOINT-isolated, log-and-continue posture
+    # app/llm/cost.py's record_llm_usage already establishes for an
+    # identical "best-effort side-write, never the caller's problem" shape:
+    # a plain try/except around the DB write below it (upsert_consent_record)
+    # isn't enough on its own, since a failed flush leaves this session's
+    # outer transaction unusable for the Message insert that follows —
+    # session.begin_nested() confines any failure (adapter unreachable,
+    # NotImplementedError for a file_storage-capability channel with no
+    # send() concept, or a genuine DB error) to just this SAVEPOINT.
+    if resolution.created_new_identity:
+        assert resolution.party is not None  # guaranteed by resolve_identity on this path
+        try:
+            async with session.begin_nested():
+                await post_consent_notice(
+                    session, channel=channel, party=resolution.party,
+                    to_external_id=raw.sender_external_id,
+                )
+        except NotImplementedError as e:
+            logger.info("consent notice not supported for channel_type=%s: %s", channel.type, e)
+        except Exception:
+            logger.warning(
+                "consent notice failed for party=%s channel=%s", resolution.party_id, channel.id,
+                exc_info=True,
+            )
 
     message = Message(
         project_id=project.id,

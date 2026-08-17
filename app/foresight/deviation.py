@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.foresight.audit import record_foresight_audit_event
 from app.foresight.models import Deviation, Risk
+from app.foresight.notification import dispatch_event
 from app.models import Evidence, OntologyTerm, Project
 
 # FR-DEV (PRD §6.7): Deviation CRUD service layer — manual creation,
@@ -115,6 +116,7 @@ async def draft_deviation(
         deviation_id=deviation.id, risk_id=risk.id if risk is not None else None,
         detail={"class_code": class_code},
     )
+    await dispatch_event(session, project=project, event_type="deviation", deviation=deviation)
     return deviation
 
 
@@ -167,6 +169,7 @@ async def create_manual_deviation(
 async def confirm_deviation(
     session: AsyncSession,
     *,
+    project: Project,
     deviation: Deviation,
     actor_id: uuid.UUID,
     corrections: dict[str, object] | None,
@@ -174,7 +177,11 @@ async def confirm_deviation(
     """FR-DEV-04's "PM confirms or edits", mirroring
     app/api/commitments.py's verify_commitment exactly: a before/after
     `changes` diff, `status` distinctly labels correction-vs-confirmation
-    the same way Commitment.verification_state does."""
+    the same way Commitment.verification_state does. `project` is a required
+    keyword param (not re-fetched by `deviation.project_id`) because the
+    sole caller, confirm_deviation_endpoint, already resolves it via
+    Depends(_require_write) — same "already sitting one frame up" posture
+    create_manual_deviation's own `project` param already has."""
     changes: dict[str, dict[str, object]] = {}
     for field, new_value in (corrections or {}).items():
         old_value = getattr(deviation, field)
@@ -193,19 +200,22 @@ async def confirm_deviation(
         action="deviation_confirmed", actor_id=actor_id, deviation_id=deviation.id,
         detail={"changes": changes} if changes else {},
     )
+    await dispatch_event(session, project=project, event_type="deviation", deviation=deviation)
     return deviation
 
 
 async def resolve_deviation(
     session: AsyncSession,
     *,
+    project: Project,
     deviation: Deviation,
     actor_id: uuid.UUID,
     resolution_date: datetime,
     resolution_owner: uuid.UUID,
 ) -> Deviation:
     """FR-DEV-03: resolution date + owner, the two fields this
-    requirement names by name."""
+    requirement names by name. `project` required for the same reason
+    confirm_deviation above takes it."""
     deviation.status = "resolved"
     deviation.resolution_date = resolution_date
     deviation.resolution_owner = resolution_owner
@@ -217,4 +227,5 @@ async def resolve_deviation(
         actor_id=actor_id, deviation_id=deviation.id,
         detail={"resolution_date": _jsonable(resolution_date), "resolution_owner": str(resolution_owner)},
     )
+    await dispatch_event(session, project=project, event_type="deviation", deviation=deviation)
     return deviation

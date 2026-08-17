@@ -207,6 +207,11 @@ class EvidenceOut(BaseModel):
     # a voice note back. A signed, expiring URI per that column's own
     # comment, or None when this evidence has no attached audio.
     media_ref: str | None
+    # FR-VOI-04: per-message mean transcription confidence, set alongside
+    # media_ref by the same voice-note pipeline (app/capture/pipeline.py) —
+    # the same "column existed, no schema exposed it" gap one field later.
+    # None for evidence with no attached voice note.
+    transcript_confidence: float | None
 
 
 class CommitmentOut(BaseModel):
@@ -613,6 +618,13 @@ class MessageOut(BaseModel):
     external_id: str
     sender_external_id: str
     author_party_id: uuid.UUID | None
+    # FR-NRM-03's own "with confidence" — set by app/capture/identity.py's
+    # resolve_identity at capture time, never previously exposed here. Lets
+    # this same debug view double as the review surface for a low-confidence
+    # match (see this round's PROGRESS.md note on why a dedicated filter/
+    # sort endpoint wasn't added this round).
+    identity_confidence: float | None
+    identity_manually_verified: bool
     sent_at: datetime
     language: str | None
     text: str | None
@@ -825,6 +837,32 @@ class DocumentLineageOut(BaseModel):
     versions: list[DocumentVersionOut]
 
 
+DocumentAuditActionLiteral = Literal[
+    "document_created", "version_created", "version_approved", "auto_tagged", "project_archived"
+]
+
+
+class DocumentAuditLogOut(BaseModel):
+    """The Documents page's own Activity tab — one document's real
+    `DocumentAuditLog` trail (app/documents/models.py), previously reachable
+    only through `/admin/export`'s whole-project bundle. `document_id` is
+    always this document's own id here (the endpoint filters on it); it's
+    still on the response because `project_archived` rows share this same
+    model with `document_id` NULL — a client that ever aggregates rows from
+    more than one fetch needs to be able to tell them apart."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    document_id: uuid.UUID | None
+    document_version_id: uuid.UUID | None
+    action: DocumentAuditActionLiteral
+    actor_id: uuid.UUID | None
+    occurred_at: datetime
+    detail: dict
+
+
 class DocumentCreate(BaseModel):
     """FR-DOC-01 ingestion — manual/API upload, same "manually-entered-but-
     fully-real" posture Ledger established for FR-LED-10: the caller
@@ -860,6 +898,12 @@ class SpecClaimOut(BaseModel):
     attribute: SpecClaimAttributeLiteral
     value: str
     contradicts: uuid.UUID | None
+    # The extraction model's own 0-1 confidence in this claim
+    # (app/documents/schema.py's ExtractedSpecClaim) — the column has
+    # carried it since app/documents/models.py's SpecClaim.confidence, no
+    # response schema exposed it until now. None for a manually-entered
+    # claim with no model confidence to report.
+    confidence: float | None
     evidence: list[EvidenceOut]
 
 

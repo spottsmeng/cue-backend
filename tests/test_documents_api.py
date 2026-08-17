@@ -10,14 +10,16 @@ doesn't exist anywhere else in this suite.
 """
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
-from app.documents.models import Document
+from app.documents.models import Document, DocumentVersion, SpecClaim
 from app.identity.config import get_identity_settings
 from app.identity.models import Membership, User
+from app.models import Evidence
 from main import app
 from tests.conftest import mint_token, set_org_context
 
@@ -89,6 +91,65 @@ async def test_create_document_manual_evidence_and_first_version(authed_org_and_
     assert version_list[0]["version_no"] == 1
     assert version_list[0]["is_current"] is True
     assert version_list[0]["id"] == body["current_version_id"]
+
+
+@pytest.mark.asyncio
+async def test_spec_claim_confidence_round_trips_through_the_api(app_session, authed_org_and_project):
+    """Blind Spots item 4: SpecClaim.confidence — the extraction model's own
+    per-claim confidence (app/documents/schema.py's ExtractedSpecClaim) —
+    used to be dropped between the model response and the persisted row,
+    and even once persisted, no response schema exposed it. Writes a claim
+    directly (deterministic, not dependent on a live extraction model, the
+    same reasoning tests/test_document_extractor.py's own FakeModelClient
+    already applies to the extraction step itself) and asserts the real
+    GET endpoint returns the same value, not silently dropping it a second
+    time on the way out."""
+    org_id, project_id, _user, token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+
+    document = Document(project_id=project_id, name="Graphic list.pdf")
+    app_session.add(document)
+    await app_session.flush()
+    version = DocumentVersion(
+        document_id=document.id, version_no=1, storage_ref="documents/x/v1/y",
+        extracted_text="Location H: 2040mm x 1040mm graphic panel.",
+    )
+    app_session.add(version)
+    await app_session.flush()
+    app_session.add(
+        Evidence(
+            document_version_id=version.id, channel="manual", sent_at=datetime.now(timezone.utc),
+            language="en", original_text="Uploaded via the CUE API.",
+        )
+    )
+    claim = SpecClaim(
+        document_version_id=version.id, location_code="H", attribute="dimension",
+        value="2040mm x 1040mm", confidence=0.77,
+    )
+    app_session.add(claim)
+    await app_session.flush()
+    app_session.add(
+        Evidence(
+            spec_claim_id=claim.id, channel="manual", sent_at=datetime.now(timezone.utc),
+            language="en", original_text="Location H: 2040mm x 1040mm graphic panel.",
+            span_start=0, span_end=10,
+        )
+    )
+    await app_session.commit()
+    document.current_version_id = version.id
+    await app_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/projects/{project_id}/documents/{document.id}/versions/{version.id}/spec-claims",
+            headers=_headers(token),
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body) == 1
+    assert body[0]["confidence"] == 0.77
 
 
 @pytest.mark.asyncio
@@ -229,6 +290,78 @@ async def test_create_document_with_class_code_at_upload(authed_org_and_project)
 
     assert response.status_code == 201, response.text
     assert response.json()["class_term_id"] is not None
+
+
+@pytest.mark.asyncio
+async def test_document_audit_log_reflects_a_real_lifecycle_most_recent_first(authed_org_and_project):
+    """The Documents page's own Activity tab surface — real DocumentAuditLog
+    rows for one document, across upload, approval and tagging, most-recent
+    first. Previously reachable only through /admin/export's whole-project
+    bundle."""
+    org_id, project_id, user, token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _upload_document(client, token, project_id)
+        document_id = created.json()["id"]
+        version_id = created.json()["current_version_id"]
+
+        await client.post(
+            f"/projects/{project_id}/documents/{document_id}/versions/{version_id}/approve",
+            headers=_headers(token),
+        )
+        await client.post(
+            f"/projects/{project_id}/documents/{document_id}/tag",
+            headers=_headers(token),
+            json={"class_code": "led_screen"},
+        )
+
+        response = await client.get(
+            f"/projects/{project_id}/documents/{document_id}/audit-log", headers=_headers(token)
+        )
+
+    assert response.status_code == 200, response.text
+    rows = response.json()
+    actions = [r["action"] for r in rows]
+    # The most-recent-first two are unambiguous — approve and tag are two
+    # genuinely separate requests, each its own transaction with its own
+    # real `occurred_at`. `document_created`/`version_created` are written
+    # in the *same* upload transaction, where Postgres's `now()` is fixed
+    # for the whole transaction (not per-statement) — both rows land on
+    # the identical timestamp, so their relative order is genuinely
+    # undefined, not something this endpoint fabricates a false answer for.
+    assert actions[:2] == ["auto_tagged", "version_approved"]
+    assert set(actions[2:]) == {"document_created", "version_created"}
+    assert all(r["document_id"] == document_id for r in rows)
+    assert all(r["actor_id"] == str(user.id) for r in rows)
+
+    version_created = next(r for r in rows if r["action"] == "version_created")
+    assert version_created["detail"] == {"version_no": 1}
+    approved = next(r for r in rows if r["action"] == "version_approved")
+    assert approved["detail"] == {"sharepoint_write_back": "ok"}
+    tagged = next(r for r in rows if r["action"] == "auto_tagged")
+    assert "class_term_id" in tagged["detail"]["changes"]
+
+
+@pytest.mark.asyncio
+async def test_document_audit_log_empty_for_a_freshly_uploaded_but_untouched_document(
+    authed_org_and_project,
+):
+    org_id, project_id, _user, token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _upload_document(client, token, project_id)
+        document_id = created.json()["id"]
+
+        response = await client.get(
+            f"/projects/{project_id}/documents/{document_id}/audit-log", headers=_headers(token)
+        )
+
+    assert response.status_code == 200, response.text
+    # document_created + version_created from the upload itself — never
+    # empty, since a document with no history at all can't exist.
+    assert {r["action"] for r in response.json()} == {"document_created", "version_created"}
 
 
 _REAL_MINIMAL_PDF = b"""%PDF-1.4

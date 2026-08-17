@@ -219,6 +219,12 @@ class DecisionLogRow(BaseModel):
     occurred_at: datetime
     from_state: str | None
     to_state: str | None
+    # The same before/after `changes` diff app/api/commitments.py's
+    # verify_commitment already writes to AuditLog.detail for a correction —
+    # app/ask/embed_worker.py's _audit_log_text already reads this column
+    # for Ask's own semantic search, but neither the Decision Log nor the
+    # Successor Brief ever read it back until now.
+    detail: dict
     provenance: ReportProvenance
 
 
