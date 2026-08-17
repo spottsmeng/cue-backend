@@ -19,6 +19,7 @@ from app.capture.adapters.fixtures_adapter import FixtureAdapter
 from app.capture.adapters.mattermost import MattermostAdapter
 from app.capture.adapters.registry import _fixture_adapter, _live_adapter, get_adapter
 from app.capture.config import (
+    CaptureSettings,
     get_capture_settings,
     get_imap_smtp_settings,
     get_mattermost_settings,
@@ -77,6 +78,16 @@ def _channel(channel_type: str, external_ref: str | None = None) -> Channel:
 
 def test_default_backend_is_fixture_for_every_code(monkeypatch):
     monkeypatch.delenv("CUE_CAPTURE_BACKEND", raising=False)
+    # `backend` is matched by exact string (`== "fixture"`), unlike the
+    # credential fields _clear_settings_cache blanks to "" above — an
+    # empty-string override here would wrongly select the *live* branch
+    # instead of representing "unset". And delenv alone isn't enough
+    # either: CaptureSettings.model_config's env_file=".env" still falls
+    # through to this repo's real backend/.env, which (per this machine's
+    # own live-testing session) may genuinely say "live" — not this test's
+    # "nothing configured -> class default" premise. Blanking env_file
+    # itself, not the var, is what actually isolates the two.
+    monkeypatch.setitem(CaptureSettings.model_config, "env_file", None)
 
     for code in ["whatsapp", "wechat", "mattermost", "imap_smtp", "nextcloud", "teams", "outlook", "sharepoint"]:
         assert isinstance(get_adapter(code), FixtureAdapter)

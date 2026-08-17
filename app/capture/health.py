@@ -118,7 +118,14 @@ async def _discover_active_channels() -> list[tuple[uuid.UUID, uuid.UUID]]:
     discovery shape app/foresight/worker.py's own _discover_active_projects
     already establishes (schema-owner connection, only for discovery; the
     actual health check itself still runs through the ordinary RLS-enforced
-    app_session with that channel's own org context set)."""
+    app_session with that channel's own org context set).
+
+    `c.detached_at IS NULL` excludes a detached channel: detaching already
+    revoked its Layer A capture permission (app/api/channels.py's
+    detach_channel), so pinging its adapter here would just re-report
+    "degraded" forever for a channel an admin deliberately turned off —
+    the row survives detach (soft-delete, not deleted) but this sweep
+    shouldn't treat it as still in service."""
     engine = create_async_engine(get_settings().migration_database_url)
     try:
         async with engine.connect() as conn:
@@ -126,7 +133,8 @@ async def _discover_active_channels() -> list[tuple[uuid.UUID, uuid.UUID]]:
                 await conn.execute(
                     text(
                         "SELECT p.organisation_id, c.id FROM channels c "
-                        "JOIN projects p ON p.id = c.project_id WHERE p.archived_at IS NULL"
+                        "JOIN projects p ON p.id = c.project_id "
+                        "WHERE p.archived_at IS NULL AND c.detached_at IS NULL"
                     )
                 )
             ).all()

@@ -23,6 +23,7 @@ from app.capture.media_pipeline import process_pending_media_for_message
 from app.capture.models import Message, MessageMedia
 from app.capture.normalise import normalise_and_ingest
 from app.capture.schema import RawCapturedMessage
+from app.core.db import org_scoped_transaction
 from app.documents.storage import StorageBackend, get_storage_backend
 from app.ledger.extractor import RejectedExtraction, extract_case
 from app.llm.client import ModelClient
@@ -238,15 +239,24 @@ async def ingest_channel_backlog(
     message durably captured (NFR-AVL-02) and resumable from
     `summary.latest_sent_at` rather than re-fetching the whole backlog from
     `since` again.
+
+    Each message's own `org_scoped_transaction` (app/core/db.py) re-asserts
+    RLS's `app.current_org_id` immediately before that message's own commit
+    — not once for the whole backlog. A per-message commit here is exactly
+    the multi-commit-per-session shape that context manager's own docstring
+    warns about: this loop is what a real, live run of `ingest_channel_job`
+    hit the bug against (a second message in the same backlog failing RLS
+    because a concurrent arq cron job reused the connection between this
+    message's commit and the next), before this was fixed.
     """
     summary = IngestionSummary()
     async for raw in adapter.fetch_backlog(channel, since=since):
         summary.received += 1
-        message, is_new, created, media_processed = await ingest_raw_message(
-            session, project=project, channel=channel, adapter=adapter, raw=raw, client=client,
-            storage=storage,
-        )
-        await session.commit()
+        async with org_scoped_transaction(session, project.organisation_id):
+            message, is_new, created, media_processed = await ingest_raw_message(
+                session, project=project, channel=channel, adapter=adapter, raw=raw, client=client,
+                storage=storage,
+            )
 
         if message is None:
             summary.opted_out += 1

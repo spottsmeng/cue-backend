@@ -146,7 +146,10 @@ async def backfill_channel(
 async def _discover_active_channels() -> list[tuple[uuid.UUID, uuid.UUID]]:
     """Same RLS-bypass discovery shape app/capture/health.py's own
     _discover_active_channels and app/foresight/worker.py's
-    _discover_active_projects already establish."""
+    _discover_active_projects already establish. `c.detached_at IS NULL`
+    for the same reason app/capture/health.py's own filter documents: a
+    detached channel's row survives (soft-delete) but its capture
+    permission is already revoked, so it should never be backfilled."""
     engine = create_async_engine(get_settings().migration_database_url)
     try:
         async with engine.connect() as conn:
@@ -154,7 +157,8 @@ async def _discover_active_channels() -> list[tuple[uuid.UUID, uuid.UUID]]:
                 await conn.execute(
                     text(
                         "SELECT p.organisation_id, c.id FROM channels c "
-                        "JOIN projects p ON p.id = c.project_id WHERE p.archived_at IS NULL"
+                        "JOIN projects p ON p.id = c.project_id "
+                        "WHERE p.archived_at IS NULL AND c.detached_at IS NULL"
                     )
                 )
             ).all()

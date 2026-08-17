@@ -22,17 +22,11 @@ from app.capture.adapters.registry import get_adapter
 from app.capture.models import ChannelExtractionSchedule
 from app.capture.pipeline import ingest_channel_backlog
 from app.core.config import get_settings
-from app.core.db import async_session_factory
+from app.core.db import async_session_factory, set_local_org_context
 from app.llm.client import ModelClient
 from app.models import Channel, Project
 
 logger = logging.getLogger("cue.capture.schedule")
-
-
-async def _set_org_context(session, org_id: uuid.UUID) -> None:
-    await session.execute(
-        text("SELECT set_config('app.current_org_id', :oid, false)"), {"oid": str(org_id)}
-    )
 
 
 async def _discover_active_schedules() -> list[tuple[uuid.UUID, uuid.UUID]]:
@@ -81,7 +75,7 @@ async def run_due_extraction_schedules(ctx: dict | None = None, *, client: Model
 
     for organisation_id, schedule_id in targets:
         async with async_session_factory() as session:
-            await _set_org_context(session, organisation_id)
+            await set_local_org_context(session, organisation_id)
             config = (
                 await session.execute(
                     select(ChannelExtractionSchedule).where(ChannelExtractionSchedule.id == schedule_id)
@@ -96,7 +90,13 @@ async def run_due_extraction_schedules(ctx: dict | None = None, *, client: Model
             project = (
                 await session.execute(select(Project).where(Project.id == config.project_id))
             ).scalar_one_or_none()
-            if channel is None or project is None:
+            # A detached channel's row survives (soft-delete, see
+            # app/api/channels.py's detach_channel) but its Layer A capture
+            # permission was already revoked at detach time — running a
+            # scheduled pull against it would just fail against Layer A (or
+            # worse, silently keep capturing if the revoke hadn't yet taken
+            # effect), for a channel an admin deliberately turned off.
+            if channel is None or channel.detached_at is not None or project is None:
                 continue
 
             try:
@@ -105,6 +105,12 @@ async def run_due_extraction_schedules(ctx: dict | None = None, *, client: Model
                     session, project=project, channel=channel, adapter=adapter, since=config.last_run_at,
                     client=client,
                 )
+                # ingest_channel_backlog re-asserts org context itself, per
+                # message, but its own last commit (inside that call)
+                # already released the connection back to the pool — this
+                # statement starts a fresh transaction and needs its own
+                # re-assertion, not a leftover from the call above.
+                await set_local_org_context(session, organisation_id)
                 config.last_run_at = now
                 await session.commit()
                 ran += 1

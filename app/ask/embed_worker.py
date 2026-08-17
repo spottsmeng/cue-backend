@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from app.ask.embeddings import EmbeddingClient, get_embedding_client
 from app.ask.models import RetrievalChunk
 from app.core.config import get_settings
-from app.core.db import async_session_factory
+from app.core.db import async_session_factory, set_local_org_context
 from app.documents.models import Document, DocumentVersion
 from app.models import AuditLog, Evidence, Project
 
@@ -30,16 +30,6 @@ logger = logging.getLogger("app.ask.embed_worker")
 # more pending rows than this catches up over several ticks rather than one
 # tick blocking indefinitely.
 _BATCH_SIZE = 32
-
-
-async def _set_org_context(session: AsyncSession, org_id: uuid.UUID) -> None:
-    """`is_local=false` — same reasoning app/foresight/worker.py's own
-    _set_org_context documents: this session runs one project's full sweep
-    across several sequential commits, not a single per-request
-    transaction."""
-    await session.execute(
-        text("SELECT set_config('app.current_org_id', :oid, false)"), {"oid": str(org_id)}
-    )
 
 
 async def _discover_active_projects() -> list[tuple[uuid.UUID, uuid.UUID]]:
@@ -223,7 +213,10 @@ async def run_embedding_sweep(ctx: dict | None = None) -> int:
     embedded = 0
     for organisation_id, project_id in targets:
         async with async_session_factory() as session:
-            await _set_org_context(session, organisation_id)
+            # set_local_org_context (app/core/db.py): this block ends in
+            # its own explicit commit-or-rollback below, not the
+            # unconditional commit org_scoped_transaction would apply.
+            await set_local_org_context(session, organisation_id)
             project = (
                 await session.execute(select(Project).where(Project.id == project_id))
             ).scalar_one_or_none()

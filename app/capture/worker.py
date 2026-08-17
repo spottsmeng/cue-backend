@@ -32,29 +32,17 @@ import uuid
 from datetime import datetime, timezone as dt_timezone
 
 from arq.connections import ArqRedis
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.capture.adapters.registry import get_adapter
 from app.capture.pipeline import IngestionSummary, ingest_channel_backlog
-from app.core.db import async_session_factory
+from app.core.db import async_session_factory, org_scoped_transaction
 from app.llm.client import ModelClient
 from app.models import Channel, Project
 
 logger = logging.getLogger("cue.capture.worker")
 
 _JOB_NAME = "ingest_channel_job"
-
-
-async def _set_org_context(session: AsyncSession, org_id: uuid.UUID) -> None:
-    """Same `is_local=false` (session-wide, not per-statement) shape
-    app/foresight/worker.py's own `_set_org_context` uses — one arq job
-    processes one channel's whole backlog across many sequential commits
-    (app/capture/pipeline.py's `ingest_channel_backlog` commits per
-    message), and the org context has to survive every one of them."""
-    await session.execute(
-        text("SELECT set_config('app.current_org_id', :oid, false)"), {"oid": str(org_id)}
-    )
 
 
 def _summary_dict(summary: IngestionSummary) -> dict:
@@ -98,25 +86,37 @@ async def ingest_channel_job(
     since_dt = datetime.fromisoformat(since) if since else None
 
     async with async_session_factory() as session:
-        await _set_org_context(session, org_uuid)
-        channel = (
-            await session.execute(select(Channel).where(Channel.id == channel_uuid))
-        ).scalar_one_or_none()
-        if channel is None:
-            logger.warning("ingest_channel_job: channel %s not found (deleted?)", channel_id)
-            return {"skipped": True, "reason": "channel not found"}
-        project = (
-            await session.execute(select(Project).where(Project.id == channel.project_id))
-        ).scalar_one_or_none()
-        if project is None:
-            logger.warning("ingest_channel_job: project for channel %s not found", channel_id)
-            return {"skipped": True, "reason": "project not found"}
+        async with org_scoped_transaction(session, org_uuid):
+            channel = (
+                await session.execute(select(Channel).where(Channel.id == channel_uuid))
+            ).scalar_one_or_none()
+            if channel is None:
+                logger.warning("ingest_channel_job: channel %s not found (deleted?)", channel_id)
+                return {"skipped": True, "reason": "channel not found"}
+            project = (
+                await session.execute(select(Project).where(Project.id == channel.project_id))
+            ).scalar_one_or_none()
+            if project is None:
+                logger.warning("ingest_channel_job: project for channel %s not found", channel_id)
+                return {"skipped": True, "reason": "project not found"}
 
+        # ingest_channel_backlog (app/capture/pipeline.py) re-asserts org
+        # context itself, per message, via the same org_scoped_transaction
+        # — not covered by the block above, which only scopes the reads.
         adapter = get_adapter(channel.type)
         summary = await ingest_channel_backlog(
             session, project=project, channel=channel, adapter=adapter, since=since_dt, client=client
         )
         return _summary_dict(summary)
+
+
+def channel_job_id(channel_id: uuid.UUID) -> str:
+    """The deterministic per-channel arq job id `enqueue_channel_ingestion`
+    below keys its own dedup on — pulled out as its own function (not just
+    an inline f-string at each call site) so a status lookup
+    (`app/api/channels.py`'s `channel_capture_status`) can construct the
+    exact same id independently, without the two places drifting apart."""
+    return f"ingest-channel-{channel_id}"
 
 
 async def enqueue_channel_ingestion(
@@ -130,5 +130,5 @@ async def enqueue_channel_ingestion(
         str(organisation_id),
         str(channel_id),
         since.isoformat() if since else None,
-        _job_id=f"ingest-channel-{channel_id}",
+        _job_id=channel_job_id(channel_id),
     )

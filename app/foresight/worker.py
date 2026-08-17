@@ -12,7 +12,7 @@ docker-compose `valkey` service this connects to).
 import logging
 import uuid
 
-from arq import cron
+from arq import cron, func
 from arq.connections import RedisSettings
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -23,7 +23,7 @@ from app.capture.reconciliation import run_gap_reconciliation_sweep
 from app.capture.schedule import run_due_extraction_schedules
 from app.capture.worker import ingest_channel_job
 from app.core.config import get_settings
-from app.core.db import async_session_factory, engine
+from app.core.db import async_session_factory, engine, org_scoped_transaction
 from app.foresight.config import get_arq_settings
 from app.foresight.contradiction import scan_contradictions
 from app.foresight.escalation import escalate_unacknowledged_risks
@@ -45,16 +45,6 @@ logger = logging.getLogger("app.foresight.worker")
 configure_otel("cue-arq-worker", engine=engine)
 
 
-async def _set_org_context(session: AsyncSession, org_id: uuid.UUID) -> None:
-    """`is_local=false` (session-wide) — this session runs one project's
-    full sweep across several sequential commits, same reasoning
-    scripts/extract_fixtures.py's own use of this mechanism gives; contrast
-    with app/core/db.py's per-request `is_local=true`."""
-    await session.execute(
-        text("SELECT set_config('app.current_org_id', :oid, false)"), {"oid": str(org_id)}
-    )
-
-
 async def run_project_sweep(session: AsyncSession, project: Project) -> None:
     """Runs every Foresight detection/maintenance pass for one project, in a
     fixed order — silence and contradiction first, since forecast.py's own
@@ -62,19 +52,25 @@ async def run_project_sweep(session: AsyncSession, project: Project) -> None:
     them makes a same-sweep silence flag visible to it immediately rather
     than one sweep cycle later. Commits after each sub-scan rather than
     once at the end, so a bug in one detector can't roll back another's
-    already-good work for the same project."""
-    await scan_silence(session, project)
-    await session.commit()
-    await scan_contradictions(session, project)
-    await session.commit()
-    await scan_forecast(session, project)
-    await session.commit()
-    await scan_overdue_commitments(session, project)
-    await session.commit()
-    await escalate_unacknowledged_risks(session, project)
-    await session.commit()
-    await deliver_due_notifications(session, project)
-    await session.commit()
+    already-good work for the same project — each sub-scan's own
+    `org_scoped_transaction` (app/core/db.py) re-asserts RLS context right
+    before that commit, since a commit releases the session's connection
+    back to the pool and a concurrent job in this same worker process could
+    otherwise reuse it before the next sub-scan runs (see that context
+    manager's own docstring for why a single set-once-per-sweep call is
+    unsafe here)."""
+    async with org_scoped_transaction(session, project.organisation_id):
+        await scan_silence(session, project)
+    async with org_scoped_transaction(session, project.organisation_id):
+        await scan_contradictions(session, project)
+    async with org_scoped_transaction(session, project.organisation_id):
+        await scan_forecast(session, project)
+    async with org_scoped_transaction(session, project.organisation_id):
+        await scan_overdue_commitments(session, project)
+    async with org_scoped_transaction(session, project.organisation_id):
+        await escalate_unacknowledged_risks(session, project)
+    async with org_scoped_transaction(session, project.organisation_id):
+        await deliver_due_notifications(session, project)
 
 
 async def _discover_active_projects() -> list[tuple[uuid.UUID, uuid.UUID]]:
@@ -113,10 +109,10 @@ async def run_foresight_sweep(ctx: dict | None = None) -> int:
     swept = 0
     for organisation_id, project_id in targets:
         async with async_session_factory() as session:
-            await _set_org_context(session, organisation_id)
-            project = (
-                await session.execute(select(Project).where(Project.id == project_id))
-            ).scalar_one_or_none()
+            async with org_scoped_transaction(session, organisation_id):
+                project = (
+                    await session.execute(select(Project).where(Project.id == project_id))
+                ).scalar_one_or_none()
             if project is None:
                 continue  # deleted between discovery and processing — skip, not an error
             try:
@@ -165,12 +161,45 @@ class WorkerSettings:
     _traced_foresight_sweep = traced_job(run_foresight_sweep)
     _traced_report_schedules = traced_job(run_due_report_schedules)
     _traced_embedding_sweep = traced_job(run_embedding_sweep)
-    _traced_ingest_channel_job = traced_job(ingest_channel_job)
     _traced_capture_health_sweep = traced_job(run_capture_health_sweep)
     _traced_gap_reconciliation_sweep = traced_job(run_gap_reconciliation_sweep)
-    _traced_extraction_schedules = traced_job(run_due_extraction_schedules)
     _traced_extraction_drift_check = traced_job(run_extraction_drift_check)
     _traced_asr_drift_check = traced_job(run_asr_drift_check)
+    # Bare (not `arq.func`-wrapped) — `arq.cron`'s own `coroutine` argument
+    # requires a real `inspect.iscoroutinefunction`, and raises if handed a
+    # `Function` wrapper instead (confirmed against arq's own source, not
+    # assumed); its per-function timeout override is applied directly on
+    # the `cron(...)` call below instead, which takes its own `timeout=`.
+    _traced_extraction_schedules = traced_job(run_due_extraction_schedules)
+
+    # arq's own worker-wide default (`job_timeout=300`) is too short for
+    # either of these: both eventually call app/capture/pipeline.py's
+    # `ingest_channel_backlog`, which makes one real per-message LLM
+    # extraction call — genuinely observed taking several minutes for a
+    # single-digit-message backlog against local Ollama, so a channel with
+    # a real backlog routinely exceeds 300s. A job arq cancels mid-flight
+    # for exceeding job_timeout doesn't just fail cleanly: it can leave the
+    # cancelled greenlet-bridged async DB call in a corrupted state
+    # (`sqlalchemy.exc.MissingGreenlet` on the next statement) — found for
+    # real via this exact path, surfaced through the new capture debug
+    # console's own real status reporting (`GET .../capture/status`) once
+    # that made a previously-silent, always-eventually-retried failure
+    # directly visible for the first time. A per-function `timeout=`
+    # override (not a worker-wide bump, which would also give every fast
+    # cron sweep the same generous allowance it doesn't need) is the fix —
+    # 30 minutes, a documented, generous-but-bounded starting point (not
+    # tuned against any measured real-backlog-size distribution, there is
+    # none yet), not the previous unbounded-in-practice risk of simply
+    # removing the timeout. `ingest_channel_job` is only ever dispatched
+    # on-demand (never cron'd), so `arq.func`'s own `timeout=` is enough
+    # for it; `run_due_extraction_schedules` is cron-only in this codebase,
+    # so its equivalent override lives on the `cron(...)` call itself
+    # below, not here — this constant is shared by both call sites so they
+    # can't silently drift apart.
+    _INGEST_JOB_TIMEOUT_SECONDS = 1800
+    _traced_ingest_channel_job = func(
+        traced_job(ingest_channel_job), timeout=_INGEST_JOB_TIMEOUT_SECONDS
+    )
 
     functions = [
         _traced_foresight_sweep, _traced_report_schedules, _traced_embedding_sweep,
@@ -196,8 +225,15 @@ class WorkerSettings:
         # other 15-minute sweep; a schedule's own interval_minutes (checked
         # by _is_due, app/capture/schedule.py) is what actually governs how
         # often a given channel's window fires, this is just how often the
-        # check itself runs.
-        cron(_traced_extraction_schedules, minute=set(range(0, 60, 15))),
+        # check itself runs. `timeout=_INGEST_JOB_TIMEOUT_SECONDS` — this
+        # loops over every due schedule's own real `ingest_channel_backlog`
+        # call, the identical slow-LLM-extraction exposure
+        # `_traced_ingest_channel_job`'s own timeout override exists for.
+        cron(
+            _traced_extraction_schedules,
+            minute=set(range(0, 60, 15)),
+            timeout=_INGEST_JOB_TIMEOUT_SECONDS,
+        ),
         # FR-CAP-08's own reconciliation job — deliberately less frequent
         # than the health check above: a triggered backfill calls a real
         # fetch_backlog() against live channel infrastructure, materially

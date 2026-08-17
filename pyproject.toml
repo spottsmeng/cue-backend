@@ -59,3 +59,11 @@ asyncio_default_test_loop_scope = "session"
 [tool.pytest_env]
 CUE_DATABASE_URL = "postgresql+asyncpg://cue_app:cue_app@localhost:5432/cue_test"
 CUE_MIGRATION_DATABASE_URL = "postgresql+asyncpg://cue:cue@localhost:5432/cue_test"
+# Same reasoning as the DB URLs above, for the same reason: this suite must
+# never depend on whatever a developer's own .env happens to be set to right
+# now. CaptureSettings.backend defaults to "fixture" (app/capture/config.py),
+# but a developer testing CUE_CAPTURE_BACKEND=live locally (real Layer A/
+# Mattermost/IMAP calls) would otherwise silently leak that into every
+# capture/writeback test that assumes the fixture adapter — confirmed live:
+# this is exactly what happened switching to live mode for real testing.
+CUE_CAPTURE_BACKEND = "fixture"

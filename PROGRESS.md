@@ -21,6 +21,7 @@ there yet.
 | M8 | Real channel capture | `Prompt 11 — Real channel capture.txt`, `Prompt 11b — Real channel capture (continued).txt` | §15 Phase 1 | M2, M4 | **Done**, with the same per-adapter honesty this milestone has had since item 2: items 1, 3–12 all genuinely built and tested this session (see M8 notes below) — real for everything not credential-blocked (Mattermost/IMAP-SMTP/Nextcloud capture, identity resolution, party-org effective-dating, consent, capture health, gap reconciliation, scheduled windows, FR-DOC-09 drift) or dependency-blocked in this sandbox (PaddleOCR, FunASR SenseVoice — real FOSS substitutes run instead, see below); code-complete/credential-blocked for WhatsApp/WeChat/Graph, unchanged from item 2 |
 | M9 | Write-back | `Prompt 12 — Write-back.txt` | §15 Phase 6 | M8 | Done (2026-08-09) |
 | M10 | Hardening & observability | `Prompt 13 — Hardening and observability.txt` | §15 Phase 11 | all of the above | Done (2026-08-09) |
+| M11 | Layer B Channel Picker | `Layer B Channel Picker — Implementation Prompt.txt` | §11.2/FR-ADM-06 (gap closure) | M8 | **Done (2026-08-17), live-verified against the real linked WhatsApp account** — see its own section below |
 
 ### M1 notes for later sessions
 
@@ -1763,6 +1764,281 @@ divergence this file's own M10 notes already document for a different fixture
 the same lesson, not assumed to be a one-off.
 
 `uv run pytest` green: 555 passing (up from 551).
+
+## M11 — Layer B Channel Picker (2026-08-17)
+
+Closed the gap `Layer B Channel Picker — Implementation Prompt.txt` names: a PM had no working way to
+attach a WhatsApp channel, because the attach form asked for a "group name" but actually required the
+raw WhatsApp group JID, which WhatsApp never shows a human anywhere. Layer A's own side of this
+(`GET /conversations`, `POST /conversations/allowlist/add|remove`, `layer-A/src/api/machine/index.ts`)
+was already built, tested, and live-verified going into this session (`layer-A/PROGRESS.md`'s own
+"Machine API conversation discovery + allowlist coupling" section) — this milestone is the backend/
+frontend half that actually calls it.
+
+**What was built:**
+
+- **`WhatsAppAdapter.list_conversations`/`add_to_allowlist`/`remove_from_allowlist`**
+  (`app/capture/adapters/whatsapp.py`) — three new methods alongside the existing
+  `fetch_backlog`/`send`/`health`/`fetch_media`, calling Layer A's Machine API the same
+  bearer-token way. Unlike the existing methods, none of these take a `Channel` — there's no
+  channel to key off of yet before an attach happens, matching Layer A's own "discovery has no
+  `group_id` to resolve from yet" design.
+- **`GET /projects/{project_id}/channels/whatsapp/conversations`** (new route,
+  `app/api/channels.py`) — a live proxy over `list_conversations`, gated the same `ADMIN_ROLES`
+  tier as `attach_channel`. Deliberately not cached beyond the request: Layer A resolves
+  conversation names in real time, not from a static list, so this route doesn't paper over that
+  with server-side caching either. A genuinely ambiguous Layer A account (more than one configured)
+  surfaces as a real 503, not a silent empty list.
+- **`attach_channel` now grants Layer A's allowlist as part of the same request** for
+  `type="whatsapp"` — the allowlist grant runs *before* the `Channel` row is inserted, so a failed
+  grant (Layer A misconfigured, unreachable, or genuinely ambiguous) never leaves a `Channel` that
+  silently captures nothing. `ChannelCreate` gained `display_name` (generic, not WhatsApp-only) —
+  the picker's own resolved label, cached at attach time rather than re-resolved live on every
+  channels-list read (see `Channel.display_name`'s own docstring, `app/models/project.py`, for the
+  full tradeoff — a real design choice with real tradeoffs, made explicitly, not defaulted into).
+  `external_ref` stays the one generic identifier field for every channel type; the picker just
+  supplies a real jid to it instead of a hand-typed value.
+- **`detach_channel` now revokes Layer A's allowlist first, then deletes the `Channel` row** — the
+  route already existed (`Layer B Channel Picker`'s own READ THIS FIRST note said to check before
+  assuming it needed building); this session added the missing other half of the coupling. Same
+  fail-closed ordering as attach: a Layer A failure leaves the `Channel` row intact and retryable
+  rather than orphaning a still-active capture grant.
+- **Migration `a1c3e6f9d2b7`** — `channels.display_name`, nullable, additive.
+
+**A stale claim corrected while in the file it was in**: `WhatsAppAdapter`'s own class docstring said
+"genuinely credential-blocked... code-complete, never live-tested," true when M8 wrote it but false by
+the time this session's own live test ran against it — corrected in place rather than left for a third
+session to trip over (the exact "verify against the real current behaviour" lesson this prompt's own
+NON-OBVIOUS section names twice).
+
+**Tested, for real, three ways:**
+
+1. `tests/test_layer_a_contract.py` — three new tests (`list_conversations`, `add_to_allowlist`
+   without disturbing an already-designated conversation, `remove_from_allowlist`) against the real
+   `contract-server.ts` subprocess, same pattern the file's existing tests already use.
+   `layer-A/test/contract-server.ts` was extended to seed two known conversations for
+   `FixtureConnector` — a test-fixture addition, not a change to Layer A's real discovery/allowlist
+   machinery itself.
+2. `tests/test_channels_api.py` — attach/detach error-path tests (Layer A unconfigured → 503, no
+   `Channel` row left behind; no `external_ref` → allowlist call correctly skipped), using
+   `monkeypatch.setattr` on the settings getter (not `os.environ` — `WhatsAppSettings` reads `.env`
+   directly, same fact `test_capture_adapters_live.py` already documents). The pre-existing
+   `test_attach_channel` switched from `type="whatsapp"` to `type="wechat"` — with the new allowlist
+   coupling, a hand-typed whatsapp `external_ref` in a generic unit test would now hit real Layer A
+   with a nonsense jid.
+3. **`tests/test_channels_whatsapp_live.py` — a real end-to-end test against the real linked WhatsApp
+   account**, same account `layer-A/PROGRESS.md`'s "WhatsApp account linking" section describes,
+   genuinely reachable in this session's environment (Layer A was already running on port 4100, real
+   `.env` credentials configured). Picks a real, currently-undesignated conversation from the picker
+   endpoint, attaches it, confirms Layer A's own allowlist actually flips to `designated: true` (not
+   just the local `Channel` row — the exact gap this whole prompt exists to close), detaches, confirms
+   it flips back. Every mutation reversed in a `finally` block regardless of outcome. Same
+   skip-cleanly-if-unconfigured/fail-for-real-if-unreachable convention as
+   `test_capture_adapters_live.py`.
+
+**A real, reproducible test-infrastructure bug found and fixed during this work, not by this
+milestone's own logic but by writing test 3 above**: an early draft of `test_channels_whatsapp_live.py`
+called `set_org_context(app_session, org_id)` redundantly — `authed_org_and_project` already sets it.
+That extra call, executed after the fixture's own commit with no matching commit/rollback of its own,
+left a session-scoped (`is_local=False`) `app.current_org_id` GUC sitting on the pooled connection at
+fixture teardown; a *later, unrelated* test in the same `uv run pytest` process that happened to draw
+that exact connection back out of the pool then failed a real RLS check
+(`tests/test_parties_compute.py`, `tests/test_foresight_*.py`, `tests/test_lifecycle.py` — 19 failures
+across the full suite, none of them in this milestone's own files). Confirmed deterministic and
+isolated to that one redundant line (removing it alone fixed all 19, twice, in isolation). This is the
+same class of pool-checkout-order flakiness `tests/conftest.py`'s own `app_session` fixture docstring
+already names as "latent... not introduced by this session" — a second, real instance of it, not a new
+bug in the mitigation itself. Left named here rather than only in the test file's own comment, since
+the next person hitting a mysterious RLS failure several files away from what they actually touched
+should be able to find this.
+
+`uv run pytest` green: 569 passing (up from 555; +1 pre-existing failure unrelated to this work —
+`test_capture_worker.py::test_enqueue_is_deduplicated_per_channel_against_real_valkey` fails because
+`docker-compose.yml`'s `valkey` service isn't port-mapped to the host in this environment, confirmed
+by `docker ps`/`nc` directly; not something this milestone's changes touch or could fix).
+
+## Capture debug console + a real production org-context concurrency bug (2026-08-17)
+
+Requested directly, not part of any numbered prompt: a manual "pull now" trigger and a raw-capture
+debug view for a channel, gated the same `ADMIN_ROLES` tier as the rest of the channels router,
+meant to run for real in production (not a throwaway dev-only tool).
+
+**What was built:**
+
+- **`GET /projects/{project_id}/channels/{channel_id}/messages`** — real `Message` rows
+  (`app/capture/models.py`), independent of extraction: a message shows up here the moment capture
+  durably writes it (NFR-AVL-02), whether or not `extraction_attempted_at` is set or produced a
+  Commitment. Chronological, oldest first.
+- **`POST /projects/{project_id}/channels/{channel_id}/capture/pull-now`** — the "manual 'poll now'
+  admin action" `app/capture/worker.py`'s own module docstring already named as a real, anticipated
+  consumer of `enqueue_channel_ingestion`; this is that consumer. Enqueues the same real arq job the
+  scheduled worker itself uses (`since=None`), never a second ingestion path. Validates `channel_id`
+  actually belongs to the calling `project` before enqueueing — `enqueue_channel_ingestion` itself
+  takes a bare channel id with no project/org check, so skipping this would let an admin of one
+  project trigger ingestion for a channel belonging to a completely different project by guessing its
+  id (caught in review, before it shipped).
+
+**A real, live-discovered production bug, fixed, not just noted:** the first live "pull now" run
+against the real linked WhatsApp account failed on the *second* message of the backlog with
+`InsufficientPrivilegeError: new row violates row-level security policy for table "messages"` — the
+first message had already committed correctly, under the right org. Root cause: `app/capture/
+worker.py` and `app/foresight/worker.py`'s own `_set_org_context` helpers set `app.current_org_id`
+with `is_local=false` (session-scoped), deliberately, because one job/sweep makes several sequential
+commits and the value needs to survive all of them. But SQLAlchemy's `AsyncSession` releases its
+DBAPI connection back to the engine's pool on every `commit()` — confirmed directly, not assumed,
+against a real connection's own `pg_backend_pid()` — so a session-scoped value set once at job start
+survives on the *physical connection* after release, and the next thing to check that connection out
+of the shared pool (arq's own cron jobs and on-demand jobs all run concurrently in one worker
+process) silently inherits it. A long-running `ingest_channel_job` (slow because of real per-message
+LLM extraction) overlapping a scheduled cron tick is exactly this scenario, and it isn't rare — it's
+the normal case for any backlog with more than a couple of messages.
+
+**The fix**: `app/core/db.py` gained two primitives —
+
+- `set_local_org_context(session, org_id)` — a bare `SET LOCAL` (`is_local=true`) call, for a caller
+  with its own custom commit/rollback branches.
+- `org_scoped_transaction(session, org_id)` — an async context manager wrapping the common "set,
+  work, commit" shape. `is_local=true` means Postgres resets it automatically at the end of *every*
+  transaction (commit or rollback), so it can never survive onto a connection returned to the pool —
+  the same guarantee `app/api/deps.py`'s `get_current_user` already relies on for the single-
+  transaction, per-request case. The only behavioural change a multi-commit caller needs is
+  re-asserting it before *each* unit of work about to be committed, not once per session.
+
+Applied everywhere the same shape existed — every `is_local=false` call site inside a *long-running,
+multi-job worker process* (not the two standalone one-shot CLI scripts, `scripts/seed_dev_data.py`/
+`scripts/extract_fixtures.py`, which hold their own dedicated pool for a short process lifetime and
+never race a concurrent job for it — left unchanged, with the reasoning now recorded in `get_session`'s
+own docstring):
+
+- `app/capture/pipeline.py`'s `ingest_channel_backlog` — the actual root cause, one commit per
+  message.
+- `app/capture/worker.py`'s `ingest_channel_job` — its own initial channel/project reads.
+- `app/foresight/worker.py`'s `run_project_sweep` (six commits per project) and `run_foresight_sweep`'s
+  own project read.
+- `app/reports/schedule.py`'s `run_due_report_schedules` and `app/ask/embed_worker.py`'s
+  `run_embedding_sweep` — each currently makes only one commit per session, so neither was actually
+  exposed to this specific race yet, but both were converted anyway: the old pattern is a landmine for
+  the next edit that adds a second commit, not a real safety margin today.
+- `app/capture/schedule.py`'s `run_due_extraction_schedules` — calls the same `ingest_channel_backlog`
+  as the fix above, plus its own trailing `config.last_run_at` write needed its own re-assertion (that
+  statement runs *after* `ingest_channel_backlog`'s own last per-message commit already released the
+  connection).
+
+**Proven with a real, adversarial concurrency test, not just the live run above**:
+`tests/test_org_context_concurrency.py` builds its own `pool_size=1, max_overflow=0` engine against
+the real test database and drives two sessions for two different orgs through several commits each,
+round by round via `asyncio.gather`, so both are genuinely contending for the pool's one connection at
+the same real point in time every round. One test reproduces the *old* pattern failing deterministically
+(a real RLS rejection, confirmed empirically that naive `asyncio.gather` without a forced scheduler
+handoff doesn't actually interleave the two tasks under this driver — a bare `asyncio.sleep(0.01)` per
+round does, verified directly against `pg_backend_pid()` before trusting the reproduction); the other
+proves `org_scoped_transaction` is safe under the identical setup, reading the result back via the
+schema-owner connection to confirm every row landed under its own correct org, not just that nothing
+raised. First draft of this test wrote `Party` rows and never failed *either* version — `parties` turned
+out to have no RLS policy at all (confirmed against `alembic/versions/a895ae03ec5c_initial_schema.py`);
+switched to `Project`, which genuinely has one.
+
+**Verified for real against the live linked WhatsApp account, after the fix**: same channel, same
+6-message real fixture backlog that previously failed on message 2 — restarted the backend + a real
+`arq` worker process from a clean Valkey queue (`docker exec cue-backend-valkey-1 valkey-cli FLUSHALL`,
+this environment's own dev queue, not production), triggered `pull-now`, all 6 messages landed with
+`extraction_attempted_at` set on every one, zero RLS errors.
+
+**Two separate, real issues surfaced by this same live run, deliberately not fixed here (out of scope
+for an org-context bug fix, named plainly rather than silently left implicit):**
+
+1. **arq's default 300s `job_timeout` is too short for a real, LLM-extraction-heavy backlog pull.**
+   The live verification run's first attempt was killed by arq's own timeout mid-flight (Ollama
+   extraction across 6 messages took longer), which left a `MissingGreenlet` error on cleanup and one
+   `KeyError` in arq's own internal job-tracking dict — arq's automatic retry then completed the job
+   correctly on the second attempt, and the worker process itself never crashed, but this is a real,
+   reproducible operational rough edge for any channel with a non-trivial backlog, not a one-off.
+   `WorkerSettings`/`ingest_channel_job`'s own per-job timeout is the fix surface; not touched this
+   session.
+2. **`detach_channel` (`app/api/channels.py`) 500s instead of a clean error once a channel has real
+   captured `Message` rows** — `messages.channel_id`'s FK has no `ON DELETE` behaviour, so
+   `session.delete(channel)` raises a raw `ForeignKeyViolationError` that reaches the client as an
+   unhandled 500. Never hit before because no existing test attaches a channel, lets the real pipeline
+   capture messages for it, and *then* detaches it in the same flow — this session's own live
+   verification was the first thing to do exactly that. The real fix is a product decision (cascade-
+   delete a channel's message history on detach, refuse detach while messages exist, or soft-delete the
+   channel instead of a hard `DELETE`), not a one-line patch — named here, not silently patched around.
+
+`uv run pytest` green: 577 passing (up from 575; the 2 new concurrency tests, no regressions).
+
+## Capture debug console, part 2: real job status, not "refresh and hope" (2026-08-17)
+
+Direct, real-user feedback on the debug console shipped in the entry just above: a static "Pull
+queued — this runs in the background; refresh in a moment" message with no actual state is bad UX
+for an action that can take minutes — no way to tell "still running" from "stuck" from "done" short
+of clicking Refresh repeatedly and guessing. Fixed by exposing arq's own real job state instead of
+inventing a second, parallel status of this API's own.
+
+**What was built:**
+
+- **`GET /projects/{project_id}/channels/{channel_id}/capture/status`** — reads `arq.jobs.Job`
+  directly (`Job(channel_job_id(channel_id), redis)`, the same deterministic per-channel id
+  `enqueue_channel_ingestion`'s own dedup already uses — pulled out as `app/capture/worker.py`'s own
+  `channel_job_id()` function so the two call sites can't drift apart). Reports
+  `not_found`/`deferred`/`queued`/`in_progress`/`complete` (arq's own `JobStatus` values verbatim),
+  and once `complete`: `success` + either the real `IngestionSummary` fields (`received`,
+  `new_messages`, `duplicates`, ...) on success, `error` (a real `str(exception)`, never a raw
+  traceback) on failure, or `skipped`/`skip_reason` for the job's own early-exit case (channel/project
+  deleted between enqueue and pickup). `pull_channel_now`'s own redis-pool boilerplate was pulled out
+  into a shared `_arq_redis()` context manager (`app/api/channels.py`) once a second endpoint needed
+  the identical connect/cleanup.
+
+**A real, live-discovered secondary bug, found *because* this new endpoint made a previously-silent
+failure visible for the first time, and fixed, not just noted:** the first real attempt to watch a
+fresh pull through to completion (a genuinely new backlog, real Ollama extraction, no cached
+duplicates to short-circuit it) surfaced `sqlalchemy.exc.MissingGreenlet` — arq's own worker-wide
+default `job_timeout=300` had been silently killing `ingest_channel_job` mid-flight and retrying it
+this whole time (this file's own prior entry already named the 300s ceiling as too short for
+LLM-heavy pulls and deliberately left it unfixed, out of scope for that session's own org-context bug;
+this session is where it actually blocked forward progress, so it got fixed here instead of deferred
+a second time). A job arq cancels for exceeding its timeout doesn't fail cleanly — the cancelled
+greenlet-bridged async DB call is left corrupted, and the *next* statement on that same job's session
+raises `MissingGreenlet`, not a clean timeout error. Fixed with `arq.func`'s per-function `timeout=`
+override (`app/foresight/worker.py`'s `WorkerSettings`, 30 minutes, applied only to
+`ingest_channel_job` and `run_due_extraction_schedules` — the two paths that actually call
+`ingest_channel_backlog` — not a worker-wide bump every fast cron sweep would inherit for no reason).
+One real, confirmed-against-arq's-own-source subtlety along the way: `arq.cron()`'s own `coroutine`
+argument requires a real `inspect.iscoroutinefunction` and raises if handed an `arq.func`-wrapped
+`Function` object instead, so `run_due_extraction_schedules` (registered both ways — on-demand via
+`functions`, scheduled via `cron_jobs`) needed its per-function timeout applied two different ways: `arq.func(..., timeout=...)` for the `functions` entry, `cron(..., timeout=...)` (that call's own
+native kwarg) for the `cron_jobs` entry — not the same wrapped object reused in both places, which
+would have raised at class-definition time.
+
+**Tested, for real:**
+
+1. `tests/test_channels_api.py` — four new tests: `not_found` before any pull; a genuinely `complete`
+   pull with the real result counts, run against a **real, burst-mode `arq.worker.Worker`** (not a
+   direct call to `ingest_channel_job`, which would never populate arq's own job-result state at all
+   — that distinction is the whole point of what this endpoint reads); a genuine `complete, success=
+   False` failure with a real error message, from a client that genuinely raises; the same
+   cross-project ownership check the other channel-scoped endpoints already enforce. The "real
+   completed pull" test needed `app.ledger.extractor.get_client` monkeypatched to the real `FakeClient`
+   (app/llm/client.py, CI's own extraction stand-in) — arq's own dispatch only ever passes the
+   positional args `enqueue_channel_ingestion` gave it, so `ingest_channel_job`'s own keyword-only
+   `client=` test seam (used everywhere else in this suite to avoid live Ollama) isn't reachable
+   through a real arq dispatch; this is the one test in the suite that has to reach one level further.
+2. **A real, live regression found and fixed by this session's own test-running process, not the
+   feature's own code**: running the full `uv run pytest` while a live `arq` worker was *also* running
+   in the background (started earlier in this session for live UI verification) made the new
+   `test_capture_status_reports_a_real_completed_pull` fail intermittently — the live worker and the
+   test's own burst-mode `Worker` were racing for the same jobs on the same real Valkey queue (arq/
+   Valkey isn't test-isolated the way Postgres is — every test in this suite that touches it already
+   implicitly assumes it's the only consumer). Confirmed by stopping the live worker and re-running:
+   581/581 clean, both with and without the fix in isolation — a testing-hygiene issue, not a bug in
+   the endpoint or the timeout fix, but worth naming so a future session doesn't chase a phantom
+   flake without knowing why.
+3. **Live-verified against a real backlog through to genuine completion**, not just short pulls that
+   short-circuit on already-captured duplicates: watched a fresh channel's pull transition `queued` →
+   `in_progress` → `complete` with real counts, confirming the 30-minute timeout actually gives real
+   Ollama extraction enough room where 300s previously did not.
+
+`uv run pytest` green: 581 passing (up from 577; 4 new tests, no regressions once the live-worker/
+test-suite race above was understood and controlled for).
 
 ## Updating this file
 

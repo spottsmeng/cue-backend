@@ -70,4 +70,35 @@ class Channel(Base, UUIDPk, Timestamped):
     external_ref: Mapped[str | None] = mapped_column(
         default=None, comment="Group ID / mailbox / drive ID, per channel type"
     )
+    display_name: Mapped[str | None] = mapped_column(
+        default=None,
+        comment=(
+            "Human-readable label, cached at attach time — not authoritative "
+            "and not kept in sync. 'Layer B Channel Picker' design choice: "
+            "GET /conversations on Layer A resolves WhatsApp group/contact "
+            "names live and would drift from a stored copy the moment a "
+            "group is renamed, but re-resolving it on every channels list "
+            "read would make that read depend on Layer A being reachable "
+            "just to render already-attached channels. A once-off label "
+            "captured from the picker at attach time (good-enough per "
+            "'Names are not authoritative', never re-synced) was chosen "
+            "over either a live join or a background refresh job, neither "
+            "of which this session builds. Null for channel types with no "
+            "discovery mechanism (external_ref alone still identifies them)."
+        ),
+    )
     healthy: Mapped[bool] = mapped_column(default=True)
+    detached_at: Mapped[datetime | None] = mapped_column(
+        TZDateTime,
+        default=None,
+        comment=(
+            "Soft-delete marker for DELETE .../channels/{id} — never a hard "
+            "delete, since messages already captured on this channel (and any "
+            "Evidence built on them, per CLAUDE.md's 'no commitment without "
+            "evidence') must survive detach. NULL means attached/active; "
+            "list/get endpoints filter this out by default. Re-attaching the "
+            "same external_ref always inserts a new Channel row rather than "
+            "reactivating this one (see FR-CAP-06 — a re-join is a fresh "
+            "consent event, not a resumed one)."
+        ),
+    )

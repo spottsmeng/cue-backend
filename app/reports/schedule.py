@@ -17,22 +17,13 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import get_settings
-from app.core.db import async_session_factory
+from app.core.db import async_session_factory, set_local_org_context
 from app.documents.storage import get_storage_backend
 from app.models import Project
 from app.reports.models import ReportScheduleConfig
 from app.reports.service import ExportBlocked, export_report
 
 logger = logging.getLogger("app.reports.schedule")
-
-
-async def _set_org_context(session, org_id: uuid.UUID) -> None:
-    """`is_local=false` — same reasoning app/foresight/worker.py's own
-    _set_org_context documents: this session runs one project's export
-    across a sequence of statements, not a single per-request transaction."""
-    await session.execute(
-        text("SELECT set_config('app.current_org_id', :oid, false)"), {"oid": str(org_id)}
-    )
 
 
 async def _discover_due_schedules() -> list[tuple[uuid.UUID, uuid.UUID, uuid.UUID]]:
@@ -90,7 +81,13 @@ async def run_due_report_schedules(ctx: dict | None = None) -> int:
 
     for organisation_id, project_id, schedule_id in targets:
         async with async_session_factory() as session:
-            await _set_org_context(session, organisation_id)
+            # set_local_org_context (app/core/db.py), not
+            # org_scoped_transaction: this whole block ends in its own
+            # explicit commit-or-rollback (below), not an unconditional
+            # commit — `is_local=true` covers it either way, since Postgres
+            # resets it at the end of the current transaction regardless of
+            # which of the two the try/except actually takes.
+            await set_local_org_context(session, organisation_id)
             project = (
                 await session.execute(select(Project).where(Project.id == project_id))
             ).scalar_one_or_none()

@@ -504,7 +504,9 @@ class ChannelOut(BaseModel):
     project_id: uuid.UUID
     type: str
     external_ref: str | None
+    display_name: str | None
     healthy: bool
+    detached_at: datetime | None
     created_at: datetime
     updated_at: datetime
 
@@ -512,10 +514,43 @@ class ChannelOut(BaseModel):
 class ChannelCreate(BaseModel):
     """FR-ADM-06's 'attach channels' step. `type` is validated against the
     channel_types table at request time, not a static Literal — see
-    app/api/channels.py's _resolve_channel_type."""
+    app/api/channels.py's _resolve_channel_type.
+
+    `external_ref` stays the one generic identifier field for every channel
+    type ('Layer B Channel Picker' prompt's own design choice — a second,
+    WhatsApp-only field would fork the shape for no real benefit): for
+    `type="whatsapp"` the frontend picker now supplies the real JID it
+    resolved from `GET .../channels/whatsapp/conversations`, never a
+    hand-typed value; every other channel type keeps supplying it directly
+    (mailbox address, drive id, ...), unchanged, since none of them has a
+    discovery mechanism to pick from (out of scope this session).
+    `display_name` is the picker's own resolved label, cached at attach
+    time — see `Channel.display_name`'s own docstring
+    (app/models/project.py) for why it isn't re-resolved live."""
 
     type: str
     external_ref: str | None = None
+    display_name: str | None = None
+
+
+class WhatsAppConversationOut(BaseModel):
+    """`GET .../channels/whatsapp/conversations` — backs the attach-flow's
+    real picker (`frontend/components/admin/project-channels-view.tsx`),
+    proxying Layer A's live Machine API `GET /conversations`
+    (`layer-A/src/api/machine/index.ts`) unmodified: real, WhatsApp-supplied
+    names, discovered independently of capture status. `jid` is the opaque
+    id a human never sees rendered directly — `name` is what the picker
+    shows, `None` when Layer A hasn't resolved a real one yet (a contact
+    whose display name/contact-sync event hasn't arrived) — the frontend
+    falls back to a generic, still-jid-free label in that case, never the
+    raw jid. `designated` reflects Layer A's own Level C allowlist state
+    *before* this project's own attach action runs (e.g. already true if an
+    operator manually added it through Layer A's ops console first)."""
+
+    jid: str
+    name: str | None
+    kind: Literal["group", "contact"]
+    designated: bool
 
 
 class ChannelTypeOut(BaseModel):
@@ -558,6 +593,78 @@ class ChannelHealthEventOut(BaseModel):
     healthy: bool
     detail: dict | None
     checked_at: datetime
+
+
+class MessageOut(BaseModel):
+    """A raw captured `Message` row (app/capture/models.py) — the debug
+    console's own view over real capture, deliberately independent of
+    extraction: a message is durably captured (NFR-AVL-02) whether or not
+    `extraction_attempted_at` is set or ever produces a Commitment.
+    `sender_external_id` is shown raw, not resolved to a Party display
+    name — this is a debug tool for capture/identity itself, so the raw
+    identity string the channel actually reported is more useful here than
+    a polished label, same reasoning `ChannelIdentityOut` already shows raw
+    `external_id` rather than hiding it."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    channel_id: uuid.UUID
+    external_id: str
+    sender_external_id: str
+    author_party_id: uuid.UUID | None
+    sent_at: datetime
+    language: str | None
+    text: str | None
+    extraction_attempted_at: datetime | None
+
+
+class CapturePullResponse(BaseModel):
+    """`POST .../capture/pull-now`'s response. `queued=False` means arq's
+    own per-channel dedup-by-job-id already had one in flight for this
+    channel (app/capture/worker.py's own `enqueue_channel_ingestion`
+    docstring) — not an error, just "already running, nothing new to do."
+    """
+
+    queued: bool
+
+
+CaptureJobStatusLiteral = Literal["not_found", "deferred", "queued", "in_progress", "complete"]
+
+
+class CaptureStatusOut(BaseModel):
+    """`GET .../capture/status` — the real arq job state behind a prior
+    `POST .../capture/pull-now`, keyed by the same deterministic per-channel
+    job id (`app/capture/worker.py`'s `channel_job_id`) arq's own dedup
+    already uses. `status` mirrors arq's own `JobStatus` enum values.
+    `not_found` covers two genuinely different real cases a caller can't
+    tell apart from this alone: no pull has ever been queued for this
+    channel, or one completed long enough ago that arq's own result TTL
+    (`keep_result`, default 1 hour) already expired it — both render the
+    same "nothing to show" way client-side, so the ambiguity is harmless.
+
+    `success`/`error` and `received`.../`latest_sent_at` are only ever
+    populated once `status="complete"`: `success=False` with `error` set
+    means the job itself raised (a real failure, `error` is `str(exception)`,
+    never a raw traceback); `success=True` with the count fields set is
+    `_summary_dict`'s own real return shape (app/capture/worker.py's
+    `IngestionSummary`), not reconstructed here. `skipped`/`skip_reason`
+    cover the job's own early-exit case (channel or project deleted between
+    enqueue and pickup) — a real, successful completion, just with nothing
+    captured, distinct from either the count-bearing success case or a
+    genuine failure."""
+
+    status: CaptureJobStatusLiteral
+    success: bool | None = None
+    error: str | None = None
+    skipped: bool | None = None
+    skip_reason: str | None = None
+    received: int | None = None
+    new_messages: int | None = None
+    duplicates: int | None = None
+    opted_out: int | None = None
+    commitments_created: int | None = None
+    latest_sent_at: datetime | None = None
 
 
 class ConsentRecordOut(BaseModel):
