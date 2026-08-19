@@ -45,6 +45,13 @@ from app.ask.models import AskConversation, AskTurn, RetrievalChunk
 from app.parties.models import VendorMetric
 from app.writeback.models import OutboundMessage, WritebackAuditLog
 from app.llm.models import LLMUsageEvent
+from app.layer_a.models import (
+    LayerAAlert,
+    LayerAAlertConfig,
+    LayerAAlertDelivery,
+    LayerAConflictEvent,
+    LayerAHealthSnapshot,
+)
 
 __all__ = [
     "Base",
@@ -98,4 +105,9 @@ __all__ = [
     "OutboundMessage",
     "WritebackAuditLog",
     "LLMUsageEvent",
+    "LayerAHealthSnapshot",
+    "LayerAConflictEvent",
+    "LayerAAlert",
+    "LayerAAlertConfig",
+    "LayerAAlertDelivery",
 ]

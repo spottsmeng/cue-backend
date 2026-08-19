@@ -30,6 +30,7 @@ from app.foresight.escalation import escalate_unacknowledged_risks
 from app.foresight.forecast import scan_forecast, scan_overdue_commitments
 from app.foresight.notification import deliver_due_notifications
 from app.foresight.silence import scan_silence
+from app.layer_a.poller import run_layer_a_poll_sweep
 from app.models import Project
 from app.observability.drift import run_asr_drift_check, run_extraction_drift_check
 from app.observability.otel import configure_otel, traced_job
@@ -165,6 +166,7 @@ class WorkerSettings:
     _traced_gap_reconciliation_sweep = traced_job(run_gap_reconciliation_sweep)
     _traced_extraction_drift_check = traced_job(run_extraction_drift_check)
     _traced_asr_drift_check = traced_job(run_asr_drift_check)
+    _traced_layer_a_poll_sweep = traced_job(run_layer_a_poll_sweep)
     # Bare (not `arq.func`-wrapped) — `arq.cron`'s own `coroutine` argument
     # requires a real `inspect.iscoroutinefunction`, and raises if handed a
     # `Function` wrapper instead (confirmed against arq's own source, not
@@ -205,6 +207,7 @@ class WorkerSettings:
         _traced_foresight_sweep, _traced_report_schedules, _traced_embedding_sweep,
         _traced_ingest_channel_job, _traced_capture_health_sweep, _traced_gap_reconciliation_sweep,
         _traced_extraction_schedules, _traced_extraction_drift_check, _traced_asr_drift_check,
+        _traced_layer_a_poll_sweep,
     ]
     # Every 15 minutes — frequent enough that a real silence/forecast/
     # escalation condition surfaces promptly, infrequent enough not to
@@ -247,5 +250,18 @@ class WorkerSettings:
         # explicit number for that capability specifically.
         cron(_traced_extraction_drift_check, hour={3}, minute={0}),
         cron(_traced_asr_drift_check, day={1}, hour={3}, minute={0}),
+        # Layer A observability (task-layer-A-observability-dashboard-prompt.
+        # txt) — every 1 minute, not this module's usual 15-minute default:
+        # the sustained-disconnect alert's own default threshold is 5
+        # minutes, and the reconnect-flapping window defaults to 10 — a
+        # 15-minute poll cadence would routinely miss both entirely rather
+        # than just detecting them a little late. Cheap per tick (a handful
+        # of small HTTP calls to one Layer A process, opt-in per
+        # organisation via layer_a_alert_config.enabled — see
+        # app/layer_a/poller.py), so the tighter cadence costs little.
+        # timeout= override for the same MissingGreenlet-risk reason
+        # _INGEST_JOB_TIMEOUT_SECONDS exists — generous relative to this
+        # job's actual expected runtime, not tuned against measured load.
+        cron(_traced_layer_a_poll_sweep, minute=set(range(0, 60, 1)), timeout=120),
     ]
     redis_settings = RedisSettings(host=_arq_settings.redis_host, port=_arq_settings.redis_port)

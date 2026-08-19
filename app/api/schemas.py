@@ -1183,3 +1183,133 @@ class CostSummaryOut(BaseModel):
     rows: list[CostSummaryRow]
     total_calls: int
     total_estimated_cost_usd: float | None
+
+
+# --- Layer A observability (task-layer-A-observability-dashboard-prompt.txt)
+# — a proxy over Layer A's own admin API (live) plus durable history/alerts
+# persisted into Postgres by app/layer_a/poller.py. `LayerAAccountOut`
+# mirrors layer-A/src/api/admin/index.ts's accountSummary() shape exactly,
+# a live pass-through rather than an ORM row (from_attributes not needed —
+# constructed directly from the parsed JSON response).
+
+LayerAAlertTypeLiteral = Literal["sustained_disconnect", "reconnect_flapping", "session_conflict"]
+LayerAAlertSeverityLiteral = Literal["serious", "critical"]
+LayerAAlertStateLiteral = Literal["open", "resolved"]
+LayerAWorkerStatusLiteral = Literal["connecting", "connected", "reconnecting", "unhealthy", "disconnected", "unknown"]
+LayerADeliveryChannelLiteral = Literal["webhook", "email", "banner"]
+
+
+class LayerAAccountOut(BaseModel):
+    accountId: str
+    channelType: str
+    mode: str | None
+    displayName: str | None
+    riskTier: str | None
+    healthy: bool
+    status: LayerAWorkerStatusLiteral
+    lastError: str | None
+    detail: dict | None
+
+
+class LayerAConflictSummary(BaseModel):
+    """The live half of "another process tried to start" — Layer A's own
+    GET /admin/conflicts pass-through, distinct from LayerAConflictEventOut
+    below (the durable Postgres copy)."""
+
+    detectedAt: int
+    refusedPid: int
+    ownerPid: int
+
+
+class LayerAHealthSnapshotOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    account_id: str
+    source: Literal["poll", "transition"]
+    recorded_at: datetime
+    status: LayerAWorkerStatusLiteral
+    connect_attempts: int
+    last_connected_at: datetime | None
+    last_message_timestamp: datetime | None
+    last_error: str | None
+    last_disconnect_reason: str | None
+    last_disconnect_status_code: int | None
+    healthy: bool | None
+    risk_tier: str | None
+
+
+class LayerAConflictEventOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    detected_at: datetime
+    refused_pid: int
+    owner_pid: int
+    ingested_at: datetime
+
+
+class LayerAAlertOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    alert_type: LayerAAlertTypeLiteral
+    account_id: str | None
+    severity: LayerAAlertSeverityLiteral
+    state: LayerAAlertStateLiteral
+    opened_at: datetime
+    resolved_at: datetime | None
+    condition_detail: dict
+    acknowledged_by: uuid.UUID | None
+    acknowledged_at: datetime | None
+
+
+class LayerAAlertDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    alert_id: uuid.UUID
+    channel: LayerADeliveryChannelLiteral
+    attempted_at: datetime
+    success: bool
+    detail: str | None
+
+
+class LayerAAlertConfigOut(BaseModel):
+    """Never carries `webhook_secret` — same "shown once, never
+    re-serialized" posture as WebhookSubscriptionOut above; a caller that
+    needs to know *whether* a secret exists reads `webhook_configured`
+    instead of the secret itself."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    organisation_id: uuid.UUID
+    enabled: bool
+    sustained_disconnect_minutes: int
+    reconnect_attempt_threshold: int
+    reconnect_attempt_window_minutes: int
+    webhook_url: str | None
+    webhook_enabled: bool
+    webhook_configured: bool = Field(
+        description="true if a signing secret has already been generated for webhook_url"
+    )
+    email_recipients: list[str]
+    email_enabled: bool
+    updated_by: uuid.UUID | None
+    updated_at: datetime
+
+
+class LayerAOpenAlertCountOut(BaseModel):
+    count: int
+
+
+class LayerAAlertConfigUpdate(BaseModel):
+    enabled: bool | None = None
+    sustained_disconnect_minutes: int | None = Field(default=None, gt=0)
+    reconnect_attempt_threshold: int | None = Field(default=None, gt=0)
+    reconnect_attempt_window_minutes: int | None = Field(default=None, gt=0)
+    webhook_url: str | None = None
+    webhook_enabled: bool | None = None
+    email_recipients: list[str] | None = None
+    email_enabled: bool | None = None

@@ -17,6 +17,7 @@ from app.api.deviations import router as deviations_router
 from app.api.documents import router as documents_router
 from app.api.foresight_admin import quiet_hours_router, threshold_router
 from app.api.identities import router as identities_router
+from app.api.layer_a_admin import router as layer_a_admin_router
 from app.api.milestones import router as milestones_router
 from app.api.notifications import router as notifications_router
 from app.api.ontology import router as ontology_router
@@ -58,6 +59,7 @@ app.include_router(channel_types_router)
 app.include_router(consent_router)
 app.include_router(retention_router)
 app.include_router(admin_router)
+app.include_router(layer_a_admin_router)
 app.include_router(documents_router)
 app.include_router(risks_router)
 app.include_router(deviations_router)
