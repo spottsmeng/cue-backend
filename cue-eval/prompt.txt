@@ -47,6 +47,10 @@ RULES
   Never translate into a language that does not appear in the message.
   deliverable_en must be the canonical English equivalent.
 - evidence_span must be an exact substring of the message that supports the extraction.
+- counterparty_name is the specific vendor organisation this commitment concerns, copied exactly as
+  written in the message (e.g. "Golden Sound & Light"). Null when the message does not name a
+  specific vendor. Never fill this with the sender's own name — it names who the commitment is
+  ABOUT, not who is speaking.
 - price_changed is true only when this message changes a price. Null when price is not discussed.
 - amount is a number without separators. currency is a 3-letter code (新币 / SGD -> "SGD").
 - confidence is your own 0-1 estimate for that commitment.

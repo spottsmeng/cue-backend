@@ -280,6 +280,102 @@ async def test_verify_with_corrections_records_correction(authed_org_and_project
     assert body["amount"] == 9000.0
 
 
+# --- vendor-attribution-task.md: PM party reassignment ----------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_can_reassign_party_to_another_vendor(authed_org_and_project, parties, app_session):
+    """Fix 3: a real, usable path for a PM to correct a commitment's vendor
+    — a commitment wrongly (or unconfidently) attributed gets reassigned the
+    same way any other field gets corrected."""
+    org_id, project_id, user, token = authed_org_and_project
+    vendor, internal = parties
+    await set_org_context(app_session, org_id)
+    other_vendor = Party(organisation_id=org_id, display_name="Golden Sound & Light", type="vendor_org")
+    app_session.add(other_vendor)
+    await app_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_commitment(client, token, project_id, vendor.id, internal.id)
+        commitment_id = created.json()["id"]
+
+        response = await client.post(
+            f"/projects/{project_id}/commitments/{commitment_id}/verify",
+            headers=_headers(token),
+            json={"corrections": {"party_id": str(other_vendor.id)}},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["verification_state"] == "human_corrected"
+    assert body["party_id"] == str(other_vendor.id)
+    assert body["party_name"] == "Golden Sound & Light"
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_party_reassignment_to_non_vendor(authed_org_and_project, parties):
+    """Reassigning must land on a real vendor_org party — not silently
+    repoint at a person/internal_staff row with a matching name, the exact
+    type-blind mix-up fix 1 closes in app/ledger/extractor.py."""
+    org_id, project_id, user, token = authed_org_and_project
+    vendor, internal = parties
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        created = await _create_commitment(client, token, project_id, vendor.id, internal.id)
+        commitment_id = created.json()["id"]
+
+        response = await client.post(
+            f"/projects/{project_id}/commitments/{commitment_id}/verify",
+            headers=_headers(token),
+            json={"corrections": {"party_id": str(internal.id)}},
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_vendor_candidates_lists_only_vendor_org_parties(authed_org_and_project, parties):
+    org_id, project_id, user, token = authed_org_and_project
+    vendor, internal = parties  # internal is internal_staff — must not appear below
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/projects/{project_id}/commitments/vendor-candidates", headers=_headers(token)
+        )
+
+    assert response.status_code == 200, response.text
+    ids = {row["id"] for row in response.json()}
+    assert str(vendor.id) in ids
+    assert str(internal.id) not in ids
+
+
+@pytest.mark.asyncio
+async def test_vendor_candidates_reachable_by_project_manager_not_just_finance(
+    authed_org_and_project, parties, app_session
+):
+    """The gap this task's fix 3 closes: GET /parties (app/api/parties.py)
+    is require_org_finance_or_administrator-gated, but a project_manager —
+    the role this task names as the one who assigns a vendor — holds
+    WRITE_ROLES, not FINANCE_ROLES, and would 403 there. This project-scoped
+    endpoint uses the same _require_write gate as every other commitment
+    write, so the same project_manager can actually reach it."""
+    org_id, project_id, user, token = authed_org_and_project
+    pm_user, pm_token = await _member(app_session, org_id, project_id, "project_manager", user.id)
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        parties_response = await client.get("/parties", headers=_headers(pm_token))
+        candidates_response = await client.get(
+            f"/projects/{project_id}/commitments/vendor-candidates", headers=_headers(pm_token)
+        )
+
+    assert parties_response.status_code == 403
+    assert candidates_response.status_code == 200, candidates_response.text
+
+
 @pytest.mark.asyncio
 async def test_valid_transition_succeeds(authed_org_and_project, parties):
     org_id, project_id, user, token = authed_org_and_project

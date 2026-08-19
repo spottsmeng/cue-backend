@@ -261,6 +261,44 @@
         ]
       },
       "note": "Bare-verb future tense ('we deliver' meaning 'we will deliver') plus sentence-final 'can' as an affirmation particle, around an explicit calendar date rather than a relative one."
+    },
+    {
+      "id": "IC01",
+      "band": "internal-channel-vendor",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Farah Rahman",
+      "sent_at": "2026-06-15T11:05:00+08:00",
+      "message": "While we're on Golden Sound & Light — can someone confirm the Stage Power Distribution Board ($6,200) is still tracking for the 29th?",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          {
+            "act_type": "query",
+            "amount": 6200,
+            "currency": "SGD",
+            "deliverable_contains": "power",
+            "counterparty_contains": "golden sound"
+          }
+        ]
+      },
+      "note": "vendor-attribution-task.md's real reported bug, verbatim. This is an *internal* Mattermost channel — the sender (Farah Rahman, Finance) is never the vendor; the vendor (Golden Sound & Light) is only named inside the message text. Tests that counterparty_name is extracted from content, not left null / filled with the sender. 'party' here is deliberately the human sender, not the vendor — app/ledger/extractor.py resolves the actual vendor party for team_collaboration channels, this harness only scores the model's own extraction."
+    },
+    {
+      "id": "IC02",
+      "band": "internal-channel-vendor",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Marcus Lim",
+      "sent_at": "2026-06-19T10:00:00+08:00",
+      "message": "Heads up — Vertex Fabrication just confirmed the truss frame is ready, they'll deliver it tomorrow morning.",
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "confirm", "due_at": "2026-06-20", "deliverable_contains": "truss", "counterparty_contains": "vertex" }
+        ]
+      },
+      "note": "Internal Mattermost channel naming a vendor already in project_context.vendors (Vertex Fabrication) — the match-against-known-vendors path, distinct from IC01's unmatched-vendor path. Sender (Marcus Lim, Producer) is internal staff relaying what the vendor said, not the vendor."
     }
   ]
 }

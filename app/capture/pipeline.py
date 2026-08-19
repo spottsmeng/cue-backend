@@ -27,7 +27,7 @@ from app.core.db import org_scoped_transaction
 from app.documents.storage import StorageBackend, get_storage_backend
 from app.ledger.extractor import RejectedExtraction, extract_case
 from app.llm.client import ModelClient
-from app.models import Channel, Evidence, Party, Project
+from app.models import Channel, ChannelType, Evidence, Party, Project
 from app.writeback.reply import handle_potential_reply
 
 logger = logging.getLogger("cue.capture.pipeline")
@@ -50,6 +50,19 @@ async def _party_display_name(session: AsyncSession, party_id: uuid.UUID | None)
         return None
     party = (await session.execute(select(Party).where(Party.id == party_id))).scalar_one_or_none()
     return party.display_name if party else None
+
+
+async def _channel_capability(session: AsyncSession, channel_type_code: str) -> str | None:
+    """`channels.type` FKs `channel_types.code` (app/models/channel_type.py),
+    not the row's `capability` directly — a real DB lookup, not the static
+    seed mapping app/capture/fixtures.py uses for offline cases.json cases,
+    since a tenant can register its own channel_types row (organisation_id
+    set) that the seed list knows nothing about."""
+    return (
+        await session.execute(
+            select(ChannelType.capability).where(ChannelType.code == channel_type_code)
+        )
+    ).scalar_one_or_none()
 
 
 async def _finalise_message_evidence(
@@ -137,9 +150,13 @@ async def extract_from_message(
         return 0
 
     party_name = await _party_display_name(session, message.author_party_id)
+    capability = await _channel_capability(session, channel.type)
     context = await build_project_context(session, project)
     case = build_case(
-        message, channel_type=channel.type, party_display_name=party_name or message.sender_external_id
+        message,
+        channel_type=channel.type,
+        party_display_name=party_name or message.sender_external_id,
+        channel_capability=capability,
     )
 
     created = 0

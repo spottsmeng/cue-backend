@@ -14,6 +14,7 @@ from app.api.schemas import (
     CommitmentOut,
     CommitmentStateLiteral,
     EvidenceOut,
+    PartyOut,
     PaymentStatusUpdate,
     TransitionRequest,
     VerifyRequest,
@@ -50,19 +51,31 @@ async def _get_commitment(
 
 
 async def _require_party(
-    session: AsyncSession, organisation_id: uuid.UUID, party_id: uuid.UUID, field: str
+    session: AsyncSession,
+    organisation_id: uuid.UUID,
+    party_id: uuid.UUID,
+    field: str,
+    expected_type: str | None = None,
 ) -> None:
     """`parties` has no RLS policy of its own (only organisations/projects/
     commitments do — see alembic/versions/a895ae03ec5c), so this
     organisation_id filter is the only thing standing between a caller and
     referencing another tenant's party by guessing its id. Without it, a bad
     or cross-tenant party_id would only be caught by the FK constraint at
-    INSERT time, surfacing as a raw 500 instead of a clean 422."""
-    exists = (
-        await session.execute(
-            select(Party.id).where(Party.id == party_id, Party.organisation_id == organisation_id)
-        )
-    ).scalar_one_or_none()
+    INSERT time, surfacing as a raw 500 instead of a clean 422.
+
+    `expected_type` (vendor-attribution-task.md): a PM reassigning a
+    commitment's vendor via CommitmentCorrection.party_id should land on a
+    real vendor_org party, not silently repoint it at the person/
+    internal_staff row a same-named channel identity already created — the
+    exact type-blind mix-up this task's fix 1 closes in
+    app/ledger/extractor.py's _get_or_create_party, checked here too since
+    this is a second, independent path onto Commitment.party_id.
+    """
+    stmt = select(Party.id).where(Party.id == party_id, Party.organisation_id == organisation_id)
+    if expected_type is not None:
+        stmt = stmt.where(Party.type == expected_type)
+    exists = (await session.execute(stmt)).scalar_one_or_none()
     if exists is None:
         raise HTTPException(status_code=422, detail=f"{field}: no such party {party_id}")
 
@@ -105,6 +118,8 @@ def _jsonable(value: object) -> object:
         return value.isoformat()
     if isinstance(value, Decimal):
         return float(value)
+    if isinstance(value, uuid.UUID):
+        return str(value)
     return value
 
 
@@ -118,10 +133,14 @@ async def _to_out(session: AsyncSession, commitment: Commitment) -> CommitmentOu
         .scalars()
         .all()
     )
+    party = (
+        await session.execute(select(Party).where(Party.id == commitment.party_id))
+    ).scalar_one()
     return CommitmentOut(
         id=commitment.id,
         project_id=commitment.project_id,
         party_id=commitment.party_id,
+        party_name=party.display_name,
         counterparty_id=commitment.counterparty_id,
         deliverable_id=commitment.deliverable_id,
         act_type_id=commitment.act_type_id,
@@ -166,6 +185,34 @@ async def list_commitments(
 
     commitments = (await session.execute(stmt)).scalars().all()
     return [await _to_out(session, c) for c in commitments]
+
+
+@router.get("/vendor-candidates", response_model=list[PartyOut])
+async def list_vendor_candidates(
+    project: Annotated[Project, Depends(_require_write)],
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[Party]:
+    """The picker behind a PM's own party-reassignment correction
+    (CommitmentCorrection.party_id — vendor-attribution-task.md fix 3).
+    app/api/parties.py's GET /parties already lists vendor_org parties, but
+    it's require_org_finance_or_administrator-gated (it's part of the
+    Vendor Reliability Graph surface) — a project_manager, the role this
+    task names as the one who assigns a vendor, holds WRITE_ROLES but not
+    FINANCE_ROLES, so that endpoint 403s for exactly the caller this form
+    needs. frontend/CLAUDE.md's own "Class B" gap shape: a write-role form
+    needing to pick an entity with no read endpoint at the write role's own
+    access tier. A new, narrower route here — same _require_write gate as
+    every other write on this commitment, vendor_org only — rather than
+    widening the finance-gated one, which also backs reliability-adjacent
+    reads this tier has no reason to inherit. Registered before
+    `/{commitment_id}` below so it isn't shadowed by that path parameter.
+    """
+    stmt = (
+        select(Party)
+        .where(Party.organisation_id == project.organisation_id, Party.type == "vendor_org")
+        .order_by(Party.display_name)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 @router.get("/{commitment_id}", response_model=CommitmentOut)
@@ -263,7 +310,18 @@ async def verify_commitment(
 
     changes: dict[str, dict[str, object]] = {}
     if body.corrections is not None:
-        for field, new_value in body.corrections.model_dump(exclude_unset=True).items():
+        correction_fields = body.corrections.model_dump(exclude_unset=True)
+        new_party_id = correction_fields.get("party_id")
+        if new_party_id is not None:
+            # vendor-attribution-task.md fix 3: the frontend's own path for a
+            # PM to correct a low-confidence/wrong vendor — same org + type
+            # validation create_commitment already applies to a fresh
+            # party_id, since this is the same field, just reassigned after
+            # the fact rather than set at creation.
+            await _require_party(
+                session, project.organisation_id, new_party_id, "party_id", expected_type="vendor_org"
+            )
+        for field, new_value in correction_fields.items():
             old_value = getattr(commitment, field)
             if new_value != old_value:
                 changes[field] = {"before": _jsonable(old_value), "after": _jsonable(new_value)}

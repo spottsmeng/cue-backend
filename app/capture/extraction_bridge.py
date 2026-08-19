@@ -67,7 +67,13 @@ async def build_project_context(session: AsyncSession, project: Project) -> Proj
     )
 
 
-def build_case(message: Message, *, channel_type: str, party_display_name: str) -> FixtureCase:
+def build_case(
+    message: Message,
+    *,
+    channel_type: str,
+    party_display_name: str,
+    channel_capability: str | None = None,
+) -> FixtureCase:
     """The real-message counterpart to a cue-eval fixture case. `band` is
     "live" — extract_case itself never reads `case["band"]` (only
     scripts/extract_fixtures.py's own print statements do, for cue-eval's
@@ -77,6 +83,15 @@ def build_case(message: Message, *, channel_type: str, party_display_name: str) 
     unlike a fixture case which has to state it explicitly) — a same-day
     relative-date resolution ("delivery by Friday") benefits from the same
     hint build_prompt already gives fixture cases.
+
+    `channel_capability` (vendor-attribution-task.md): the caller's own
+    lookup of this channel's `channel_types.capability` row, passed through
+    untouched. `party_display_name` stays the message's *author* for every
+    capability — including team_collaboration, where the author is internal
+    staff, not the vendor — the branch that stops app/ledger/extractor.py
+    from treating the author as the vendor lives entirely in
+    `extract_case`/`_resolve_vendor_for_item`, keyed off this field; this
+    function only carries the value, it doesn't interpret it.
     """
     return FixtureCase(
         id=str(message.id),
@@ -84,6 +99,7 @@ def build_case(message: Message, *, channel_type: str, party_display_name: str) 
         lang=message.language or "und",
         channel=channel_type,
         party=party_display_name,
+        channel_capability=channel_capability,
         sent_at=message.sent_at.isoformat(),
         message=message.text or "",
         sent_weekday=message.sent_at.strftime("%A"),

@@ -217,11 +217,21 @@ class EvidenceOut(BaseModel):
 class CommitmentOut(BaseModel):
     """§11.1: 'Every commitment field returned includes confidence,
     verification_state and evidence[]' — evidence is always populated here,
-    never left for the client to fetch separately."""
+    never left for the client to fetch separately.
+
+    `party_name` (vendor-attribution-task.md): `party_id` on its own is a
+    Class A gap (frontend/CLAUDE.md) — no prior response resolved it to a
+    label, so a caller wanting to show or correct "who this is attributed
+    to" had no way to render it without a second round-trip. Resolved
+    server-side in app/api/commitments.py's `_to_out`, the same explicit-
+    select-not-relationship() pattern this codebase already uses everywhere
+    else a Party is read.
+    """
 
     id: uuid.UUID
     project_id: uuid.UUID
     party_id: uuid.UUID
+    party_name: str
     counterparty_id: uuid.UUID
     deliverable_id: uuid.UUID | None
     act_type_id: uuid.UUID
@@ -260,13 +270,22 @@ class CommitmentCreate(BaseModel):
 
 class CommitmentCorrection(BaseModel):
     """FR-LED-08's 'correct if needed' step — every field optional, since
-    most verifications correct nothing."""
+    most verifications correct nothing.
+
+    `party_id` (vendor-attribution-task.md): the one field this endpoint
+    validates against the DB before applying (app/api/commitments.py's
+    verify_commitment) — every other field here is a scalar the model itself
+    produced, but a wrong party_id is exactly what a commitment lands in
+    `pending_verification` for (a low-confidence internal-channel vendor
+    attribution), so this is a real reassignment control, not a typo fix.
+    """
 
     deliverable_en: str | None = None
     deliverable_original: str | None = None
     due_at: datetime | None = None
     amount: float | None = None
     currency: str | None = None
+    party_id: uuid.UUID | None = None
 
 
 class VerifyRequest(BaseModel):

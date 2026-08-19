@@ -21,6 +21,15 @@ from app.models import Commitment, Evidence, OntologyTerm, Party
 
 _SGT = dt_timezone(timedelta(hours=8))
 
+# team_collaboration channels (Mattermost/Teams — internal Pico staff
+# discussing a vendor, never the vendor themselves) have no confidently
+# identified vendor to fall back to when the model can't name one — unlike
+# external_vendor_chat, where the message's own sender always *is* the
+# vendor. This is the one-row bucket a PM triages from Vendor Status
+# (app/reports/composer.py's Party.type == "vendor_org" filter), not a
+# silent attach to whoever typed the message.
+_UNRESOLVED_VENDOR_NAME = "Unresolved Vendor"
+
 
 class RejectedExtraction(Exception):
     """Raised when a model-returned commitment fails code-level verification.
@@ -70,7 +79,9 @@ async def _get_or_create_party(
     session: AsyncSession, organisation_id: UUID, display_name: str, party_type: str
 ) -> Party:
     stmt = select(Party).where(
-        Party.organisation_id == organisation_id, Party.display_name == display_name
+        Party.organisation_id == organisation_id,
+        Party.display_name == display_name,
+        Party.type == party_type,
     )
     party = (await session.execute(stmt)).scalar_one_or_none()
     if party is None:
@@ -78,6 +89,48 @@ async def _get_or_create_party(
         session.add(party)
         await session.flush()
     return party
+
+
+def _match_known_vendor(vendors: list[dict], name: str) -> str | None:
+    """Case-insensitive match of a model-extracted counterparty name against
+    the project's already-known vendor_org parties (`context["vendors"]`) —
+    returns the *canonical* stored name (not the model's raw string) so
+    `_get_or_create_party` lands on the existing row rather than minting a
+    near-duplicate that only differs in case."""
+    needle = name.strip().lower()
+    for vendor in vendors:
+        canonical = vendor.get("party", "")
+        if canonical.strip().lower() == needle:
+            return canonical
+    return None
+
+
+def _resolve_vendor_for_item(
+    case: FixtureCase, context: ProjectContext, counterparty_name: str | None
+) -> tuple[str, bool]:
+    """Who the commitment's `party` (who owes it) should be, and whether
+    that attribution is confident enough to skip pending_verification.
+
+    external_vendor_chat (WhatsApp/WeChat): the sender genuinely is the
+    vendor — `case["party"]` (already resolved from the message author,
+    app/capture/identity.py) is used as-is, same behaviour as before this
+    task. team_collaboration (Mattermost/Teams): the sender is internal
+    Pico staff *discussing* a vendor, never the vendor — the author is never
+    used as the vendor; instead the model's own `counterparty_name` for this
+    commitment is matched against the project's known vendors, falling back
+    to the model's literal string (unconfident) or, failing that, an
+    explicit "unresolved" placeholder (also unconfident).
+    """
+    if case.get("channel_capability") != "team_collaboration":
+        return case["party"], True
+
+    if counterparty_name:
+        matched = _match_known_vendor(context.get("vendors", []), counterparty_name)
+        if matched is not None:
+            return matched, True
+        return counterparty_name, False
+
+    return _UNRESOLVED_VENDOR_NAME, False
 
 
 async def _get_commitment_act_term(session: AsyncSession, code: str) -> OntologyTerm:
@@ -127,7 +180,6 @@ async def extract_case(
     except (json.JSONDecodeError, ValidationError) as e:
         raise RejectedExtraction(f"model output failed schema validation: {e}") from e
 
-    vendor = await _get_or_create_party(session, organisation_id, case["party"], "vendor_org")
     internal = await _get_or_create_party(
         session, organisation_id, "Pico Project Team", "internal_staff"
     )
@@ -139,13 +191,22 @@ async def extract_case(
                 f"evidence_span not found verbatim in source message: {item.evidence_span!r}"
             )
 
+        vendor_name, party_confident = _resolve_vendor_for_item(case, context, item.counterparty_name)
+        vendor = await _get_or_create_party(session, organisation_id, vendor_name, "vendor_org")
+
         act_term = await _get_commitment_act_term(session, item.act_type)
         due_at = _parse_timestamp(item.due_at) if item.due_at else None
 
         # FR-LED-07: price, approval, date and scope-change fields route to
-        # pending_verification regardless of confidence.
+        # pending_verification regardless of confidence. A commitment whose
+        # vendor couldn't be confidently identified from an internal-channel
+        # message reuses the same state (task: "route low-confidence
+        # attribution to human review, not a silent guess") rather than a
+        # third value — one queue a PM already checks, not two.
         verification_state = (
-            "pending_verification" if (item.amount is not None or due_at is not None) else "auto"
+            "pending_verification"
+            if (item.amount is not None or due_at is not None or not party_confident)
+            else "auto"
         )
 
         commitment = Commitment(

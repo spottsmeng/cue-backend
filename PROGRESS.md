@@ -2180,6 +2180,87 @@ exist).
 
 `uv run pytest` green: **593 passing** (up from 591; 2 new tests, no regressions).
 
+## Closing TC-04/TC-05: the two gaps the verification guide itself found (2026-08-17)
+
+Writing a real, click-by-click test guide for the Blind Spots round surfaced two more real gaps —
+not backend field-plumbing this time, but "the product genuinely has no way to produce this data at
+all," caught by trying to actually walk the guide rather than by re-reading code. Named plainly and
+fixed, same discipline as everything else in this round.
+
+**TC-04 — spec-claim extraction had no trigger.** `POST .../spec-claims/extract` already existed
+and worked; nothing in the product called it. No backend change needed — `frontend/PROGRESS.md`'s
+matching entry has the fix (a real "Extract spec claims" button). Verified live against this
+environment's own real `qwen2.5:14b` Ollama: a real upload + real extraction produced three real
+claims (dimension/finish/quantity) with real confidence scores, through the actual running app.
+
+**TC-05 — voice-note `transcript_confidence` had no way to exist outside a live channel.**
+`FixtureAdapter.fetch_media` raised `NotImplementedError` unconditionally — even a fixture-backed
+"Pull now" could never produce real audio for the real ASR pipeline to transcribe. Fixed with a
+real, checked-in voice-note asset (`app/capture/adapters/fixtures_assets/sample_voice_note.wav`,
+real speech via macOS `say`/`afconvert`, ~5s, real content: *"Confirming the LED wall installation
+will be completed by Friday, total cost $1,200"*) and a matching `RawCapturedMessage` in
+`FixtureAdapter._cases_for`.
+
+**A real design decision, made explicitly rather than defaulted into**: the new voice note is gated
+on `channel.type == "wechat" and channel.external_ref == "voice-demo"`, not on channel type alone.
+Two reasons, both found by tracing the actual consequence before committing to a design, not assumed:
+1. **Blast radius.** Every existing test's whatsapp channel already asserts an exact fixture message
+   count (25 call sites at `external_ref="g1"`); making the voice note unconditional for every
+   whatsapp channel would have silently broken all of them and added a real ASR transcription to
+   tests that have nothing to do with voice notes. Gating on a specific, unused `external_ref`
+   sentinel gives zero existing tests the new fixture at all.
+2. **WhatsApp itself doesn't work for this.** Attaching a `type="whatsapp"` channel through the real
+   product replaces the free-text `external_ref` field with a real conversation picker (the Layer B
+   Channel Picker work) — a typed sentinel like `"voice-demo"` literally isn't enterable for that
+   channel type anymore. WeChat still has the plain field, discovered only by trying to actually
+   attach the channel through the UI as the verification guide itself instructs, not by reading the
+   backend in isolation.
+
+**Real ASR, not a stub**: `get_default_asr_client()`'s existing `FasterWhisperClient(model_size=
+"tiny")` — already proven fast/deterministic enough for CI by `tests/test_capture_voice_note_
+pipeline.py`'s own real-audio test — transcribes the checked-in asset for real every time this fires;
+no new fake-provider concept was needed, unlike the LLM/embedding layers. Confirmed once, standalone,
+before wiring it in: `"Confirming the LED wall installation will be completed by Friday, total cost
+$1,200."`, mean confidence 0.755.
+
+**Real end-to-end test** (`tests/test_capture_worker.py`, `test_voice_demo_channel_processes_the_
+real_fixture_voice_note`) — through `ingest_channel_job`, the exact callable a live "Pull now" click
+invokes: real transcript copied onto `Message.text` (media_pipeline.py's own voice-note posture,
+`message.text` was empty), real language detection from the transcript, a real `MessageMedia` row
+with a real `transcript_confidence` in `[0, 1]`, a scripted-but-real extraction client producing a
+real `Commitment`, and the resulting `Evidence.transcript_confidence` matching the media row's own
+value — the exact field `EvidenceViewer`'s confidence badge reads.
+
+**Live UI verification blocked, then completed for real, in the same session**: this session's own
+running backend originally had `CUE_CAPTURE_BACKEND=live` set in `.env` (left over from an earlier
+live-WhatsApp verification session, per this file's own prior entries) — every "Pull now" click
+against it tried real channel credentials regardless of channel type, fixtures included. Not a defect
+in this fix (confirmed: `uv run pytest` isolates to `CUE_CAPTURE_BACKEND=fixture` unconditionally via
+`pyproject.toml`'s `[tool.pytest_env]`, exactly so a developer's own live-mode `.env` can never leak
+into the test suite — the mechanism worked as designed). The user then switched `.env` back to
+`CUE_CAPTURE_BACKEND=fixture` and restarted both the backend and the `arq` worker (`get_capture_
+settings()` is `@lru_cache`d — a running process never sees a `.env` edit without a restart) — with
+both processes genuinely fresh, a real Playwright-driven walk through the actual running app
+confirmed the whole path live, not just at the automated-test layer:
+
+1. Attached a `wechat` channel with `external_ref="voice-demo"` through the real Admin UI.
+2. **Pull now → "Pull finished — 5 new message(s), 0 already captured."** — the real fixture voice
+   note alongside cases.json's own 4 wechat text cases, exactly as designed.
+3. The captured-messages debug console showed the real transcript verbatim: *"Confirming the LED
+   wall installation will be completed by Friday, total cost $1,200."*, with a real `confidence 100%`
+   identity badge (item 6).
+4. Real `qwen2.5:14b` extraction produced a genuine commitment — "LED wall installation," $1,200,
+   due 26 Jun 2026 — visible in the real Living WIP report.
+5. Opening that commitment's real evidence panel showed a real, playable `<audio>` element (a real
+   signed URL into the real MinIO-backed storage) and, directly beneath the evidence text, **`confidence
+   76%`** — the real `Evidence.transcript_confidence` badge this whole round exists to put there.
+   Matches the standalone ASR sanity check run before this fixture was wired in (mean confidence
+   0.755) — same real model, same real checked-in file, consistent result.
+
+`uv run pytest` green: **594 passing** (up from 593; 1 new test, no regressions across the 25
+existing whatsapp-channel tests the design change above was specifically built to leave untouched).
+Both the automated and the live-UI path are now genuinely proven, not just the former.
+
 ## Updating this file
 
 When a milestone completes:

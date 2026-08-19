@@ -9,15 +9,17 @@ docker-compose.yml's `valkey` service) — the actual mechanism item 3's own
 Redis client could prove.
 """
 
+import json
 import uuid
 
 import pytest
 from arq.connections import RedisSettings, create_pool
 from sqlalchemy import select
 
+from app.capture.models import Message, MessageMedia
 from app.capture.worker import enqueue_channel_ingestion, ingest_channel_job
 from app.foresight.config import get_arq_settings
-from app.models import Channel, Commitment
+from app.models import Channel, Commitment, Evidence
 from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
@@ -53,6 +55,98 @@ async def test_ingest_channel_job_processes_real_backlog(app_session, org_and_pr
         await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
     ).scalars().all()
     assert commitments == []
+
+
+class _CommitmentFromVoiceNoteClient:
+    """Real ASR (no override — get_default_asr_client's own FasterWhisper
+    "tiny" model, already proven fast/deterministic enough for this exact
+    fixture, tests/test_capture_voice_note_pipeline.py's own real-ASR
+    precedent) produces the transcript this rule matches against; only the
+    extraction call itself is scripted, same "one thing not proven live"
+    boundary every other test in this module already draws."""
+
+    async def complete(self, prompt: str, schema: dict):
+        if "LED wall installation" in prompt:
+            return (
+                json.dumps(
+                    {
+                        "commitments": [
+                            {
+                                "act_type": "commit",
+                                "deliverable_en": "LED wall installation",
+                                "deliverable_original": "LED wall installation",
+                                "evidence_span": "LED wall installation will be completed by Friday",
+                                "confidence": 0.9,
+                            }
+                        ]
+                    }
+                ),
+                FAKE_LLM_USAGE,
+            )
+        return '{"commitments": []}', FAKE_LLM_USAGE
+
+
+@pytest.mark.asyncio
+async def test_voice_demo_channel_processes_the_real_fixture_voice_note(app_session, org_and_project):
+    """Blind Spots follow-up (TC-05): a WeChat channel attached with
+    external reference "voice-demo" gets FixtureAdapter's own real
+    voice-note fixture — real checked-in audio, real ASR, real extraction,
+    through the exact same `ingest_channel_job` a live "Pull now" click
+    calls. WeChat, not WhatsApp — attaching a `whatsapp` channel through the
+    real product replaces the free-text external-reference field with a
+    real conversation picker (the Layer B Channel Picker work), so a typed
+    sentinel like this one is only actually reachable for a channel type
+    that keeps the plain field. Closes the "transcript_confidence has no
+    path to exist outside a live channel" gap named in frontend/
+    PROGRESS.md's Blind Spots notes — this is what makes that path real
+    without needing one.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    channel = Channel(project_id=project_id, type="wechat", external_ref="voice-demo", healthy=True)
+    app_session.add(channel)
+    await app_session.commit()
+    channel_id = channel.id
+
+    result = await ingest_channel_job(
+        None, str(org_id), str(channel_id), client=_CommitmentFromVoiceNoteClient()
+    )
+
+    # A "voice-demo" wechat channel still gets cases.json's own 4 text
+    # cases (unchanged from every other wechat channel) plus this one real
+    # voice note — 5, not 1.
+    assert result["received"] == 5
+    assert result["new_messages"] == 5
+    assert result["commitments_created"] == 1
+
+    message = (
+        await app_session.execute(select(Message).where(Message.channel_id == channel_id, Message.external_id == "VN01"))
+    ).scalar_one()
+    # The real transcript, copied onto Message.text since this message
+    # arrived with no text of its own (media_pipeline.py's own voice-note
+    # posture) — proves ASR genuinely ran, not a canned string.
+    assert message.text is not None
+    assert "LED wall installation" in message.text
+    assert message.language == "en"
+
+    media = (
+        await app_session.execute(select(MessageMedia).where(MessageMedia.message_id == message.id))
+    ).scalar_one()
+    assert media.kind == "voice_note"
+    assert media.storage_key is not None
+    assert media.transcript_confidence is not None
+    assert 0.0 <= media.transcript_confidence <= 1.0
+
+    commitment = (
+        await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
+    ).scalar_one()
+    evidence = (
+        await app_session.execute(select(Evidence).where(Evidence.commitment_id == commitment.id))
+    ).scalar_one()
+    # Item 5's own real, end-to-end surface: the same real confidence the
+    # media pipeline computed, now on the Evidence row EvidenceViewer reads.
+    assert evidence.media_ref is not None
+    assert evidence.transcript_confidence == media.transcript_confidence
 
 
 @pytest.mark.asyncio

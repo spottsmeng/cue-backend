@@ -16,7 +16,7 @@ from app.capture.consent import upsert_consent_record
 from app.capture.models import Message
 from app.capture.pipeline import ingest_channel_backlog, ingest_raw_message
 from app.capture.schema import RawCapturedMessage, compute_payload_hash
-from app.models import Channel, Commitment, Evidence, Project
+from app.models import Channel, Commitment, Evidence, Party, Project
 from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
 
@@ -140,6 +140,78 @@ async def test_backlog_ingestion_is_idempotent_across_two_runs(app_session, org_
         await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
     ).scalars().all()
     assert len(commitments) == 1
+
+
+@pytest.mark.asyncio
+async def test_internal_channel_message_attributes_to_named_vendor_not_sender(
+    app_session, org_and_project
+):
+    """vendor-attribution-task.md, end-to-end through the real pipeline:
+    channel.type -> channel_types.capability lookup
+    (app/capture/pipeline.py's _channel_capability) -> build_case ->
+    extract_case's vendor resolution. Confirms the real wiring, not just
+    extract_case in isolation (tests/test_extractor.py already covers that
+    function's own logic directly)."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    project = (await app_session.execute(select(Project).where(Project.id == project_id))).scalar_one()
+    channel = Channel(project_id=project_id, type="mattermost", external_ref="c1", healthy=True)
+    app_session.add(channel)
+    await app_session.commit()
+
+    raw = RawCapturedMessage(
+        external_id="M01",
+        sender_external_id="Farah Rahman",
+        sent_at=datetime(2026, 6, 15, tzinfo=dt_timezone.utc),
+        text=(
+            "While we're on Golden Sound & Light — can someone confirm the Stage "
+            "Power Distribution Board ($6,200) is still tracking for the 29th?"
+        ),
+        raw_payload_hash=compute_payload_hash("mattermost", "M01", b"seed"),
+    )
+    client = ScriptedModelClient(
+        rules=[
+            (
+                "Stage Power Distribution Board",
+                {
+                    "commitments": [
+                        {
+                            "act_type": "query",
+                            "deliverable_en": "Stage Power Distribution Board",
+                            "deliverable_original": "Stage Power Distribution Board",
+                            "amount": 6200,
+                            "currency": "SGD",
+                            "counterparty_name": "Golden Sound & Light",
+                            "evidence_span": "Stage Power Distribution Board ($6,200)",
+                            "confidence": 0.9,
+                        }
+                    ]
+                },
+            )
+        ],
+    )
+
+    message, is_new, created, _media_processed = await ingest_raw_message(
+        app_session, project=project, channel=channel, adapter=FixtureAdapter(), raw=raw, client=client,
+    )
+    await app_session.commit()
+    assert is_new
+    assert created == 1
+
+    commitment = (
+        await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
+    ).scalar_one()
+    party = (
+        await app_session.execute(select(Party).where(Party.id == commitment.party_id))
+    ).scalar_one()
+    assert party.display_name == "Golden Sound & Light"
+    assert party.type == "vendor_org"
+
+    sender_party = (
+        await app_session.execute(select(Party).where(Party.id == message.author_party_id))
+    ).scalar_one()
+    assert sender_party.display_name == "Farah Rahman"
+    assert commitment.party_id != sender_party.id
 
 
 @pytest.mark.asyncio

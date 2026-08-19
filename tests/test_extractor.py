@@ -16,9 +16,10 @@ import pytest
 from app.ledger.extractor import (
     RejectedExtraction,
     _get_commitment_act_term,
+    _get_or_create_party,
     extract_case,
 )
-from app.models import Commitment, Evidence
+from app.models import Commitment, Evidence, Party
 from sqlalchemy import select
 from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
@@ -31,6 +32,7 @@ CONTEXT = {
     "event_days": ["2026-06-24"],
     "doors": "2026-06-24T09:00:00+08:00",
     "known_milestones": [{"name": "Test Milestone", "due": "2026-06-20"}],
+    "vendors": [{"party": "Ah Seng Production", "category": "AV"}],
 }
 
 
@@ -203,3 +205,187 @@ async def test_unseeded_commitment_act_raises_lookup_error(app_session):
     drifts silently."""
     with pytest.raises(LookupError, match="not seeded"):
         await _get_commitment_act_term(app_session, "definitely_not_a_real_code")
+
+
+# --- vendor-attribution-task.md ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_or_create_party_is_type_scoped(app_session, org_and_project):
+    """Fix 1: a same-named row of a *different* type must never be returned
+    — this is the exact chain the real bug rode in on (a person-type Party
+    app/capture/identity.py already created for a channel identity, silently
+    reused as the vendor_org party because the old lookup never filtered on
+    type)."""
+    org_id, _ = org_and_project
+    await set_org_context(app_session, org_id)
+
+    person = Party(organisation_id=org_id, display_name="Golden Sound & Light", type="person")
+    app_session.add(person)
+    await app_session.flush()
+
+    vendor = await _get_or_create_party(app_session, org_id, "Golden Sound & Light", "vendor_org")
+    assert vendor.id != person.id
+    assert vendor.type == "vendor_org"
+
+    # idempotent: a second call with the same (name, type) finds the row it
+    # just created, not a third one.
+    again = await _get_or_create_party(app_session, org_id, "Golden Sound & Light", "vendor_org")
+    assert again.id == vendor.id
+
+
+def _team_collaboration_case(message: str, **overrides) -> dict:
+    case = make_case(message, channel="mattermost", party="Farah Rahman")
+    case["channel_capability"] = "team_collaboration"
+    case.update(overrides)
+    return case
+
+
+@pytest.mark.asyncio
+async def test_internal_channel_commitment_never_attributed_to_the_sender(
+    app_session, org_and_project
+):
+    """The bug, reproduced directly: on a team_collaboration channel, the
+    message's author (Farah Rahman) must never become the commitment's
+    vendor party — regardless of what the model returns for
+    counterparty_name."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = _team_collaboration_case(
+        "While we're on Golden Sound & Light — can someone confirm the Stage Power "
+        "Distribution Board ($6,200) is still tracking for the 29th?"
+    )
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                {
+                    "act_type": "query",
+                    "deliverable_en": "Stage Power Distribution Board",
+                    "deliverable_original": "Stage Power Distribution Board",
+                    "amount": 6200,
+                    "currency": "SGD",
+                    "counterparty_name": "Golden Sound & Light",
+                    "evidence_span": "Stage Power Distribution Board ($6,200)",
+                    "confidence": 0.9,
+                }
+            ]
+        }
+    )
+
+    created = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id,
+        context=CONTEXT, case=case, client=fake,
+    )
+    await app_session.commit()
+
+    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    assert party.display_name != "Farah Rahman"
+    assert party.display_name == "Golden Sound & Light"
+    assert party.type == "vendor_org"
+
+
+@pytest.mark.asyncio
+async def test_internal_channel_matches_known_project_vendor(app_session, org_and_project):
+    """When the model's counterparty_name matches a vendor already known to
+    the project (context["vendors"]), that's a confident attribution — no
+    forced pending_verification purely from party confidence."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = _team_collaboration_case(
+        "Heads up — ah seng production just confirmed the truss frame is ready.",
+        party="Marcus Lim",
+    )
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                {
+                    "act_type": "confirm",
+                    "deliverable_en": "truss frame",
+                    "deliverable_original": "truss frame",
+                    "counterparty_name": "ah seng production",  # model's own casing
+                    "evidence_span": "truss frame is ready",
+                    "confidence": 0.9,
+                }
+            ]
+        }
+    )
+
+    created = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id,
+        context=CONTEXT, case=case, client=fake,
+    )
+    await app_session.commit()
+
+    assert created[0].verification_state == "auto"
+    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    # Canonical stored name from context["vendors"], not the model's raw casing.
+    assert party.display_name == "Ah Seng Production"
+
+
+@pytest.mark.asyncio
+async def test_internal_channel_with_no_named_vendor_lands_unresolved_and_pending(
+    app_session, org_and_project
+):
+    """No counterparty_name at all (model couldn't identify one) — fix 3:
+    route to pending_verification rather than silently attaching to the
+    internal sender."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = _team_collaboration_case("Can someone chase the vendor on this?")
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                {
+                    "act_type": "query",
+                    "deliverable_en": "vendor follow-up",
+                    "deliverable_original": "vendor follow-up",
+                    "evidence_span": "chase the vendor on this",
+                    "confidence": 0.5,
+                }
+            ]
+        }
+    )
+
+    created = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id,
+        context=CONTEXT, case=case, client=fake,
+    )
+    await app_session.commit()
+
+    assert created[0].verification_state == "pending_verification"
+    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    assert party.display_name == "Unresolved Vendor"
+    assert party.type == "vendor_org"
+
+
+@pytest.mark.asyncio
+async def test_external_vendor_chat_behaviour_is_unchanged(app_session, org_and_project):
+    """No channel_capability at all (the default for every pre-existing
+    caller/test, and for a real whatsapp/wechat channel) — the sender is
+    still the vendor, exactly as before this task."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = make_case("screen install will be delayed 2 hrs, confirmed.", party="Ah Seng Production")
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                {
+                    "act_type": "confirm",
+                    "deliverable_en": "screen install",
+                    "deliverable_original": "screen install",
+                    "evidence_span": "screen install will be delayed 2 hrs",
+                    "confidence": 0.85,
+                }
+            ]
+        }
+    )
+
+    created = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id,
+        context=CONTEXT, case=case, client=fake,
+    )
+    await app_session.commit()
+
+    assert created[0].verification_state == "auto"
+    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    assert party.display_name == "Ah Seng Production"

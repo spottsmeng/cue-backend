@@ -120,6 +120,9 @@ def match_one(exp, got):
                 got.get("deliverable_en", ""), got.get("deliverable_original", "")
             ).lower()
             hits += 1 if str(want).lower() in blob else 0
+        elif field == "counterparty_contains":
+            blob = (got.get("counterparty_name") or "").lower()
+            hits += 1 if str(want).lower() in blob else 0
         elif field == "due_at":
             have, want_s = norm_dt(got.get("due_at")), norm_dt(want)
             if have and want_s:

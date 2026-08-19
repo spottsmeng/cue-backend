@@ -29,6 +29,7 @@ class ExtractedCommitment(BaseModel):
     amount: float | None = None
     currency: str | None = None
     price_changed: bool | None = None
+    counterparty_name: str | None = None
     evidence_span: str
     confidence: float
 
