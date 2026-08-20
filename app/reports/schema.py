@@ -229,9 +229,23 @@ class DecisionLogRow(BaseModel):
 
 
 class OutstandingApprovalRow(BaseModel):
+    """One row of the review queue a PM actually reads.
+
+    Carried the deliverable and a date and nothing else, which makes a queue
+    of thirty rows untriageable: no vendor to chase, no amount to weigh, and
+    above all no reason — a price waiting for confirmation and a possible
+    hallucination looked identical. `verification_reasons` is the machine
+    vocabulary set at extraction time (app/ledger/extractor.py's
+    REVIEW_* constants); the renderer maps it to display text.
+    """
+
     commitment_id: uuid.UUID
     deliverable_en: str
+    party_name: str | None
     due_at: datetime | None
+    amount: float | None
+    currency: str | None
+    verification_reasons: list[str]
     provenance: ReportProvenance
 
 

@@ -402,6 +402,47 @@ async def _get_commitment_act_term(session: AsyncSession, code: str) -> Ontology
     return term
 
 
+# The review queue's triage vocabulary. Stable machine keys, not sentences —
+# app/reports/composer.py and the frontend map them to display text, the same
+# separation ontology_terms.code draws everywhere else in this codebase.
+REVIEW_MONETARY = "monetary_field"
+REVIEW_DATE = "date_field"
+REVIEW_VENDOR_UNCONFIRMED = "vendor_unconfirmed"
+REVIEW_OVER_SPLIT = "overlapping_spans"
+REVIEW_MERGED_VENDORS = "multiple_vendors_in_span"
+REVIEW_LOW_CONFIDENCE = "low_model_confidence"
+# Reached through the `relates_to` path rather than at creation.
+REVIEW_UNAPPLIED_CLAIM = "unapplied_claim"
+REVIEW_LOW_CONFIDENCE_LINK = "low_confidence_link"
+
+
+def _verification_reasons(v: "_VerifiedItem", *, over_split: bool) -> list[str]:
+    """Every reason this commitment needs a human, not just the first.
+
+    Returned as a list rather than collapsed to a boolean because
+    `verification_state` already answers "does someone need to look" and
+    answers nothing else. A PM opening a queue of thirty rows cannot tell a
+    price waiting for confirmation from a possible hallucination, and those
+    want opposite amounts of attention. Order is fixed so two identical
+    extractions produce identical rows.
+    """
+    reasons: list[str] = []
+    # FR-LED-07: money and dates route to review regardless of confidence.
+    if v.item.amount is not None:
+        reasons.append(REVIEW_MONETARY)
+    if v.due_at is not None:
+        reasons.append(REVIEW_DATE)
+    if not v.party_confident:
+        reasons.append(REVIEW_VENDOR_UNCONFIRMED)
+    if over_split:
+        reasons.append(REVIEW_OVER_SPLIT)
+    if v.names_multiple_vendors:
+        reasons.append(REVIEW_MERGED_VENDORS)
+    if v.item.confidence < _LOW_CONFIDENCE:
+        reasons.append(REVIEW_LOW_CONFIDENCE)
+    return reasons
+
+
 def _overlapping_span_indexes(verified: list[_VerifiedItem]) -> set[int]:
     """Indexes of items whose evidence span overlaps another item's.
 
@@ -554,14 +595,7 @@ async def extract_case(
         # identified from an internal-channel message; a commitment quoting
         # the same text as another one (the over-split signature); and a
         # commitment the model itself was not confident about.
-        needs_review = (
-            v.item.amount is not None
-            or v.due_at is not None
-            or not v.party_confident
-            or index in overlapping
-            or v.names_multiple_vendors
-            or v.item.confidence < _LOW_CONFIDENCE
-        )
+        reasons = _verification_reasons(v, over_split=index in overlapping)
 
         commitment = Commitment(
             project_id=project_id,
@@ -576,7 +610,8 @@ async def extract_case(
             currency=v.item.currency,
             confidence=v.item.confidence,
             field_confidence={},
-            verification_state="pending_verification" if needs_review else "auto",
+            verification_state="pending_verification" if reasons else "auto",
+            verification_reasons=reasons,
         )
         session.add(commitment)
         await session.flush()  # need commitment.id for the evidence row below
@@ -705,13 +740,19 @@ async def _attach_evidence_to_existing(
         commitment = (
             await session.execute(select(Commitment).where(Commitment.id == commitment_id))
         ).scalar_one()
+        reason = REVIEW_UNAPPLIED_CLAIM if claims else REVIEW_LOW_CONFIDENCE_LINK
         detail["unapplied_claims"] = claims
-        detail["flagged_reason"] = "unapplied_claims" if claims else "low_confidence_link"
+        detail["flagged_reason"] = reason
         # Kept so a human_verified commitment that a later message contradicts
         # shows *what* it had been verified as, rather than the verification
         # silently disappearing.
         detail["prior_verification_state"] = commitment.verification_state
         commitment.verification_state = "pending_verification"
+        if reason not in commitment.verification_reasons:
+            # Appends rather than replaces: the row may already be in the
+            # queue for its own reasons, and a later message asserting a
+            # change does not retire those.
+            commitment.verification_reasons = [*commitment.verification_reasons, reason]
         await session.flush()
 
     await record_audit_event(

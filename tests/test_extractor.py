@@ -15,6 +15,7 @@ import pytest
 
 from app.ledger.context import load_open_commitment_context
 from app.ledger.extractor import (
+    REVIEW_UNAPPLIED_CLAIM,
     RejectedExtraction,
     _get_commitment_act_term,
     _get_or_create_party,
@@ -534,7 +535,8 @@ async def test_linked_message_carrying_a_price_flags_instead_of_dropping_it(
     linked_event = [a for a in audit if a.action == "evidence_added"][0]
     assert linked_event.detail["unapplied_claims"]["amount"] == 6200
     assert linked_event.detail["unapplied_claims"]["currency"] == "SGD"
-    assert linked_event.detail["flagged_reason"] == "unapplied_claims"
+    assert linked_event.detail["flagged_reason"] == REVIEW_UNAPPLIED_CLAIM
+    assert REVIEW_UNAPPLIED_CLAIM in existing.verification_reasons
     assert linked_event.detail["prior_verification_state"] == "auto"
 
 

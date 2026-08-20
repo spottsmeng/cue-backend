@@ -748,10 +748,18 @@ async def test_linked_price_claim_reaches_the_review_queue_and_names_its_reason(
     assert linked["detail"]["unapplied_claims"] == {
         "amount": 6200, "currency": "SGD", "act_type": "renegotiate",
     }
-    assert linked["detail"]["flagged_reason"] == "unapplied_claims"
+    assert linked["detail"]["flagged_reason"] == "unapplied_claim"
 
-    # 3. The same row is reachable through the list endpoint's own filter.
+    # 3. The queue row itself is triageable: it names the vendor to chase and
+    #    why it is here, not just a deliverable and a date. A PM with thirty
+    #    flagged rows cannot otherwise tell a price awaiting confirmation from
+    #    a possible hallucination.
+    row = next(a for a in approvals if a["commitment_id"] == str(existing.id))
+    assert row["verification_reasons"] == ["unapplied_claim"]
+    assert row["party_name"] is not None
+
+    # 4. The same row is reachable through the list endpoint's own filter.
     assert str(existing.id) in [c["id"] for c in queue.json()]
 
-    # 4. And the price was still never applied.
+    # 5. And the price was still never applied.
     assert [c["amount"] for c in queue.json() if c["id"] == str(existing.id)] == [None]

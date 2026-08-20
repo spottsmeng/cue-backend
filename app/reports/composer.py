@@ -404,14 +404,23 @@ async def _compose_decision_and_approval_log(
             .order_by(AuditLog.occurred_at.desc())
         )
     ).scalars().all()
-    pending = (
-        await session.execute(
-            select(Commitment).where(
-                Commitment.project_id == project.id,
-                Commitment.verification_state == "pending_verification",
+    # Joined to Party so the queue names the vendor to chase. Ordered so an
+    # identical project renders an identical report: due date first (the
+    # thing that makes a review urgent), then id to break ties, since a bare
+    # SELECT leaves row order to the planner.
+    pending = list(
+        (
+            await session.execute(
+                select(Commitment, Party.display_name)
+                .join(Party, Party.id == Commitment.party_id)
+                .where(
+                    Commitment.project_id == project.id,
+                    Commitment.verification_state == "pending_verification",
+                )
+                .order_by(Commitment.due_at.asc().nulls_last(), Commitment.id.asc())
             )
-        )
-    ).scalars().all()
+        ).all()
+    )
 
     return DecisionAndApprovalLogSection(
         decisions=[
@@ -432,10 +441,14 @@ async def _compose_decision_and_approval_log(
             OutstandingApprovalRow(
                 commitment_id=c.id,
                 deliverable_en=c.deliverable_en,
+                party_name=vendor_name,
                 due_at=c.due_at,
+                amount=_num(c.amount),
+                currency=c.currency,
+                verification_reasons=list(c.verification_reasons or []),
                 provenance=_commitment_provenance(c),
             )
-            for c in pending
+            for c, vendor_name in pending
         ],
     )
 

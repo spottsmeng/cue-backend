@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, Enum, ForeignKey, Numeric
+from sqlalchemy import CheckConstraint, Enum, ForeignKey, Numeric, String
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -128,6 +128,18 @@ class Commitment(Base, UUIDPk, Timestamped):
     confidence: Mapped[float] = mapped_column(default=0.0)
     field_confidence: Mapped[dict] = mapped_column(JSONB, default=dict)
     verification_state: Mapped[str] = mapped_column(VerificationState, default="auto")
+    verification_reasons: Mapped[list[str]] = mapped_column(
+        ARRAY(String),
+        default=list,
+        comment=(
+            "Why this row is in the review queue, set at extraction time. "
+            "verification_state says a human must look; this says what to look "
+            "at. Every route into pending_verification collapses into one "
+            "state on purpose (one queue a PM checks, not five), which leaves "
+            "a triage problem: a price to confirm and a possible hallucination "
+            "are the same colour without this."
+        ),
+    )
     verified_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), default=None
     )
