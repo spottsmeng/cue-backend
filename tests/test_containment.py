@@ -220,14 +220,33 @@ async def test_a_bare_hallucination_on_a_vendor_chat_is_NOT_contained(
     the accident of having invented a date too.
 
     Nothing here is calibrated to catch it. `confidence` cannot: it is the
-    model's self-report, and it was 0.95 while hallucinating. Grounding the
-    deliverable in the message was considered and not shipped — CD01's
-    invented "LED screen install" shares the token "install" with its own
-    message, so a zero-overlap rule misses it, and a majority-overlap rule
-    starts flagging legitimate commitments on plural/inflection mismatches.
-    Trading a silent wrong row for a noisy review queue is not obviously the
-    better deal, and picking between them needs the real discovery corpus,
-    not a synthetic guess.
+    model's self-report, and it was 0.95 while hallucinating.
+
+    The obvious candidate guard was measured and rejected on the numbers.
+    cue-eval/prompt.txt already requires `deliverable_original` to be "copied
+    verbatim from the message", so it could be enforced in code the way
+    evidence_span is — and a hallucinated deliverable is by definition not in
+    the message. Measured over the full 20-case suite on qwen2.5:14b, 3 runs,
+    81 returned commitments: 18.5% had a non-verbatim deliverable_original,
+    and the breakdown is what kills it —
+
+        T01  (expect=1, real)  'LED screen install'
+        T06  (expect=1, real)  'zone C 铝架 deliver'
+        S01  (expect=1, real)  'LED screen install'
+        CD02 (expect=1, real)  'LED screen install'
+        CD01 (expect=0, FAKE)  'LED screen install'
+
+    Four legitimate commitments flagged for every hallucination caught. A
+    queue with a 4:1 false-positive rate is one a PM stops reading, which
+    costs more than the row it would have caught.
+
+    The recurring value is the tell: "LED screen install" is milestone #3 in
+    the injected project context, and the model reuses that exact string as a
+    deliverable name across unrelated messages. For a real commitment that is
+    arguably good — canonical, groupable naming. For CD01 it is the
+    hallucination. The same mechanism produces both, which is precisely why
+    no grounding rule can separate them, and why this needs the real
+    discovery corpus rather than a cleverer synthetic heuristic.
 
     Kept as a failing-shaped assertion, not an xfail, so the day something
     does catch it this test breaks loudly and gets updated on purpose.
