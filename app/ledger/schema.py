@@ -64,9 +64,24 @@ def build_extraction_json_schema(allowed_refs: list[str] | None = None) -> dict:
     the model to invent a plausible-looking "C1" that refers to nothing. The
     static file keeps the wider `["string", "null"]` type so it stays readable
     and valid on its own; this narrowing is per-call, never written back.
+
+    `type` is *removed* when the enum goes on, and that is not cosmetic. A
+    union type alongside an enum containing null is legal JSON Schema, and
+    Ollama accepts it, but the Anthropic structured-outputs validator rejects
+    it outright:
+
+        output_config.format.schema: Invalid schema:
+        Enum value None does not match declared type '['string', 'null']'
+
+    Production extraction runs claude-haiku-4-5, so every call carrying ledger
+    context returned a 400 — the entire `relates_to` path was dead against the
+    production model while passing locally, because the local model is the
+    only one that accepts the shape. An enum already fixes the value space
+    exactly, so the type annotation was redundant even where it was accepted.
     """
     schema = copy.deepcopy(load_extraction_json_schema())
     relates_to = schema["properties"]["commitments"]["items"]["properties"]["relates_to"]
+    relates_to.pop("type", None)
     relates_to["enum"] = [None, *(allowed_refs or [])]
     return schema
 

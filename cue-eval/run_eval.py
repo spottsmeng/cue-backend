@@ -62,6 +62,12 @@ def case_schema(case):
     schema = json.loads(json.dumps(SCHEMA))  # cheap deep copy, stdlib only
     n = len(case.get("ledger_context") or [])
     props = schema["properties"]["commitments"]["items"]["properties"]
+    # `type` is dropped alongside the enum for the same reason production does
+    # it (app/ledger/schema.py's build_extraction_json_schema): Anthropic's
+    # structured-outputs validator rejects a null enum value against a
+    # ["string","null"] union, while Ollama accepts it happily. Keeping this
+    # identical to production is the only reason that bug was findable here.
+    props["relates_to"].pop("type", None)
     props["relates_to"]["enum"] = [None] + ["C{}".format(i) for i in range(1, n + 1)]
     return schema
 

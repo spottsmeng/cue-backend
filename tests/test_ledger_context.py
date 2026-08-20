@@ -347,3 +347,54 @@ async def test_relevance_never_crowds_out_a_pinned_commitment(
         message="screen install screen install screen install",
     )
     assert pinned.id in [i.commitment_id for i in items]
+
+
+def test_relates_to_enum_carries_no_type_union_alongside_it():
+    """Pins the shape that made the whole `relates_to` path fail in
+    production while every local test passed.
+
+    `{"type": ["string","null"], "enum": [null, "C1"]}` is legal JSON Schema
+    and Ollama accepts it, so the local eval and this suite were both green.
+    Anthropic's structured-outputs validator rejects it:
+
+        Invalid schema: Enum value None does not match declared type
+        '['string', 'null']'
+
+    Production extraction is claude-haiku-4-5, so every extraction call
+    carrying ledger context 400'd — the fix for the reported bug was dead
+    against the only model that runs it. An enum fixes the value space by
+    itself; the type annotation was redundant wherever it was accepted.
+    """
+    schema = build_extraction_json_schema(["C1", "C2"])
+    relates_to = schema["properties"]["commitments"]["items"]["properties"]["relates_to"]
+
+    assert relates_to["enum"] == [None, "C1", "C2"]
+    assert "type" not in relates_to
+
+    empty = build_extraction_json_schema([])
+    empty_relates_to = empty["properties"]["commitments"]["items"]["properties"]["relates_to"]
+    assert empty_relates_to["enum"] == [None]
+    assert "type" not in empty_relates_to
+
+
+def test_eval_harness_builds_the_same_relates_to_shape_as_production():
+    """cue-eval/run_eval.py hand-duplicates the schema narrowing so it can run
+    with no app imports. That duplication is why the production 400 was
+    reproducible in the harness at all — and why the two have to be pinned
+    together, or the harness stops being able to find this class of bug."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cue-eval"))
+    import run_eval
+
+    harness = run_eval.case_schema({"ledger_context": [{}, {}]})
+    production = build_extraction_json_schema(["C1", "C2"])
+    path = ("properties", "commitments", "items", "properties", "relates_to")
+
+    def dig(schema):
+        for key in path:
+            schema = schema[key]
+        return schema
+
+    assert dig(harness) == dig(production)
