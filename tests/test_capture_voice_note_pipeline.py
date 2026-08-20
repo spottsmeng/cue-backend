@@ -97,14 +97,15 @@ async def test_voice_note_transcript_flows_into_extraction_and_evidence(app_sess
         })]
     )
 
-    message, is_new, created, media_processed = await ingest_raw_message(
+    ingested = await ingest_raw_message(
         app_session, project=project, channel=channel, adapter=_VoiceNoteAdapter(audio), raw=raw,
         client=client, storage=get_storage_backend(),
     )
+    message = ingested.message
     await app_session.commit()
 
-    assert is_new is True
-    assert media_processed == 1
+    assert ingested.is_new is True
+    assert ingested.media_processed == 1
     assert message.text is not None
     assert "led screen" in message.text.lower() or "delivery" in message.text.lower()
 
@@ -115,7 +116,7 @@ async def test_voice_note_transcript_flows_into_extraction_and_evidence(app_sess
     assert media.transcript_confidence is not None
     assert 0.0 <= media.transcript_confidence <= 1.0
 
-    assert created == 1
+    assert ingested.extraction.created == 1
     commitment = (
         await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
     ).scalar_one()

@@ -35,12 +35,69 @@ logger = logging.getLogger("cue.capture.pipeline")
 
 
 @dataclass
+class ExtractionCounts:
+    """What extraction did to the ledger for one message, or summed over a run.
+
+    `created` alone cannot describe this any more. Since a message can now
+    link to an already-logged commitment instead of creating a duplicate
+    (app/ledger/extractor.py's `relates_to` path), "created 0" covers both
+    "nothing in this message" and "this message was correctly recognised as
+    being about three existing commitments" — opposite outcomes that a single
+    counter reports identically.
+
+    That matters because over-linking is how under-splitting would arrive
+    through the memory path: the model collapsing genuinely new promises into
+    old ones. Created-count drops, nothing else moves, and it reads as a quiet
+    week. `linked` is what makes that visible.
+
+    `flagged` is the containment numerator — of the commitments this run
+    created, how many landed in `pending_verification` rather than straight
+    onto the ledger as `auto`. The product's claim is not that extraction is
+    always right, it is that when extraction is wrong a human sees it; this
+    is the ratio that claim is measured by.
+    """
+
+    created: int = 0
+    linked: int = 0
+    flagged: int = 0
+    rejected: int = 0
+
+    def __iadd__(self, other: "ExtractionCounts") -> "ExtractionCounts":
+        self.created += other.created
+        self.linked += other.linked
+        self.flagged += other.flagged
+        self.rejected += other.rejected
+        return self
+
+
+@dataclass
+class IngestedMessage:
+    """One message's trip through the pipeline.
+
+    A dataclass rather than the 4-tuple this used to be: it wanted to grow to
+    six the moment extraction reported more than a created-count, and a tuple
+    that wide is read positionally at every call site.
+    """
+
+    message: Message | None
+    is_new: bool
+    extraction: ExtractionCounts
+    media_processed: int
+
+    @property
+    def commitments_created(self) -> int:
+        return self.extraction.created
+
+
+@dataclass
 class IngestionSummary:
     received: int = 0
     new_messages: int = 0
     duplicates: int = 0
     opted_out: int = 0
     commitments_created: int = 0
+    commitments_linked: int = 0
+    commitments_flagged: int = 0
     extractions_rejected: int = 0
     media_processed: int = 0
     latest_sent_at: datetime | None = None
@@ -129,7 +186,7 @@ async def extract_from_message(
     client: ModelClient | None = None,
     storage: StorageBackend | None = None,
     pinned_commitment_ids: tuple[uuid.UUID, ...] = (),
-) -> int:
+) -> ExtractionCounts:
     """Runs the extraction contract (app/ledger/extractor.py's extract_case)
     against one real captured Message. Guards against ever extracting the
     same message twice (`extraction_attempted_at`) — arq's at-least-once
@@ -163,12 +220,12 @@ async def extract_from_message(
     extraction, keep the message" expressible at all.
     """
     if message.extraction_attempted_at is not None:
-        return 0
+        return ExtractionCounts()
 
     if not message.text:
         message.extraction_attempted_at = datetime.now(dt_timezone.utc)
         await session.flush()
-        return 0
+        return ExtractionCounts()
 
     party_name = await _party_display_name(session, message.author_party_id)
     capability = await _channel_capability(session, channel.type)
@@ -189,7 +246,7 @@ async def extract_from_message(
         channel_capability=capability,
     )
 
-    created = 0
+    counts = ExtractionCounts()
     try:
         async with session.begin_nested():
             outcome = await extract_case(
@@ -201,7 +258,11 @@ async def extract_from_message(
                 client=client,
                 ledger_context=ledger_context,
             )
-            created = len(outcome.created)
+            counts.created = len(outcome.created)
+            counts.linked = len(outcome.linked)
+            counts.flagged = sum(
+                1 for c in outcome.created if c.verification_state == "pending_verification"
+            )
             await _finalise_message_evidence(
                 session,
                 message=message,
@@ -217,12 +278,12 @@ async def extract_from_message(
                     message.id, len(outcome.linked), [str(c) for c in outcome.linked],
                 )
     except RejectedExtraction as e:
-        created = 0
+        counts = ExtractionCounts(rejected=1)
         logger.info("extraction rejected for message %s: %s", message.id, e)
     finally:
         message.extraction_attempted_at = datetime.now(dt_timezone.utc)
         await session.flush()
-    return created
+    return counts
 
 
 async def ingest_raw_message(
@@ -234,7 +295,7 @@ async def ingest_raw_message(
     raw: RawCapturedMessage,
     client: ModelClient | None = None,
     storage: StorageBackend | None = None,
-) -> tuple[Message | None, bool, int, int]:
+) -> IngestedMessage:
     """One message through the full item-3 pipeline: normalise -> identity
     resolve -> consent gate -> media (item 6) -> extract. Returns (message,
     is_new, commitments_created, media_processed) — `message` is the
@@ -248,7 +309,7 @@ async def ingest_raw_message(
     """
     result = await normalise_and_ingest(session, project=project, channel=channel, raw=raw)
     if result.message is None or not result.is_new:
-        return result.message, result.is_new, 0, 0
+        return IngestedMessage(result.message, result.is_new, ExtractionCounts(), 0)
 
     # FR-WBK-06/07: rides this same pipeline, not a second inbound path —
     # checked before extraction, on every newly-captured message, so a reply
@@ -279,11 +340,11 @@ async def ingest_raw_message(
     # part of the reply that answers the question links to the existing row
     # instead of being read as a second, duplicate promise.
     pinned = (reply.commitment_id,) if reply.commitment_id is not None else ()
-    created = await extract_from_message(
+    extraction = await extract_from_message(
         session, project=project, channel=channel, message=result.message, client=client,
         storage=storage, pinned_commitment_ids=pinned,
     )
-    return result.message, True, created, media_processed
+    return IngestedMessage(result.message, True, extraction, media_processed)
 
 
 async def ingest_channel_backlog(
@@ -320,20 +381,26 @@ async def ingest_channel_backlog(
     async for raw in adapter.fetch_backlog(channel, since=since):
         summary.received += 1
         async with org_scoped_transaction(session, project.organisation_id):
-            message, is_new, created, media_processed = await ingest_raw_message(
+            ingested = await ingest_raw_message(
                 session, project=project, channel=channel, adapter=adapter, raw=raw, client=client,
                 storage=storage,
             )
 
+        message = ingested.message
         if message is None:
             summary.opted_out += 1
             continue
-        if is_new:
+        if ingested.is_new:
             summary.new_messages += 1
         else:
             summary.duplicates += 1
-        summary.commitments_created += created
-        summary.media_processed += media_processed
+        summary.commitments_created += ingested.extraction.created
+        summary.commitments_linked += ingested.extraction.linked
+        summary.commitments_flagged += ingested.extraction.flagged
+        # Was declared and never incremented anywhere — a dead field
+        # reporting zero rejections however many the run actually had.
+        summary.extractions_rejected += ingested.extraction.rejected
+        summary.media_processed += ingested.media_processed
         if summary.latest_sent_at is None or message.sent_at > summary.latest_sent_at:
             summary.latest_sent_at = message.sent_at
 

@@ -197,12 +197,13 @@ async def test_internal_channel_message_attributes_to_named_vendor_not_sender(
         ],
     )
 
-    message, is_new, created, _media_processed = await ingest_raw_message(
+    ingested = await ingest_raw_message(
         app_session, project=project, channel=channel, adapter=FixtureAdapter(), raw=raw, client=client,
     )
+    message = ingested.message
     await app_session.commit()
-    assert is_new
-    assert created == 1
+    assert ingested.is_new
+    assert ingested.extraction.created == 1
 
     commitment = (
         await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
@@ -237,12 +238,13 @@ async def test_opted_out_party_messages_never_reach_extraction(app_session, org_
         text="Morning Mei — screen install will be delayed 2 hrs, we'll start 4pm instead of 2pm.",
         raw_payload_hash=compute_payload_hash("whatsapp", "T01", b"seed"),
     )
-    message, is_new, created, _media_processed = await ingest_raw_message(
+    ingested = await ingest_raw_message(
         app_session, project=project, channel=channel, adapter=FixtureAdapter(), raw=raw,
         client=ScriptedModelClient(rules=[]),
     )
+    message = ingested.message
     await app_session.commit()
-    assert message is not None
+    assert ingested.message is not None
 
     await upsert_consent_record(
         app_session, party_id=message.author_party_id, project_id=project_id, status="opted_out",
@@ -323,17 +325,23 @@ async def test_second_message_sees_the_first_ones_commitment_in_context(
             raw=raw, client=client,
         )
 
-    _m1, _new1, created1, _ = await ingest("M1", "screen install will be delayed 2 hrs")
+    created1 = (await ingest("M1", "screen install will be delayed 2 hrs")).extraction.created
     await app_session.commit()
     assert created1 == 1
 
-    _m2, _new2, created2, _ = await ingest(
+    second = await ingest(
         "M2", "Can we get written confirmation the 4pm start still lands before end of day?"
     )
     await app_session.commit()
 
     # The whole point: the second message created no new commitment.
-    assert created2 == 0
+    assert second.extraction.created == 0
+    # ...but it was not a no-op either, and the counters have to tell those
+    # apart. "created 0" alone reads identically for "nothing in this message"
+    # and "correctly recognised as being about an existing commitment" — the
+    # second being exactly how over-linking (under-splitting via the memory
+    # path) would arrive, with created dropping and nothing else moving.
+    assert second.extraction.linked == 1
     commitments = (
         await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
     ).scalars().all()
@@ -392,13 +400,17 @@ async def test_a_rejected_extraction_never_loses_the_captured_message(
         ]})],
     )
 
-    message, is_new, created, _ = await ingest_raw_message(
+    ingested = await ingest_raw_message(
         app_session, project=project, channel=channel, adapter=FixtureAdapter(),
         raw=raw, client=client,
     )
+    message = ingested.message
     await app_session.commit()
 
-    assert is_new and created == 0
+    assert ingested.is_new and ingested.extraction.created == 0
+    # `rejected` used to be a declared-but-never-incremented field, so a run
+    # reported zero rejections however many it actually had.
+    assert ingested.extraction.rejected == 1
     # The message survived...
     assert (
         await app_session.execute(select(Message).where(Message.id == message.id))
@@ -454,11 +466,11 @@ async def test_linking_a_later_message_does_not_repoint_the_earlier_evidence(
             raw=raw, client=client,
         )
 
-    m1, _, _, _ = await ingest("E1", "screen install will be delayed 2 hrs")
+    m1 = (await ingest("E1", "screen install will be delayed 2 hrs")).message
     await app_session.commit()
-    m2, _, _, _ = await ingest(
+    m2 = (await ingest(
         "E2", "Can we get written confirmation the 4pm start still lands before end of day?"
-    )
+    )).message
     await app_session.commit()
 
     commitment = (

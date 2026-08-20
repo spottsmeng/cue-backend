@@ -52,6 +52,11 @@ def _summary_dict(summary: IngestionSummary) -> dict:
         "duplicates": summary.duplicates,
         "opted_out": summary.opted_out,
         "commitments_created": summary.commitments_created,
+        # created alone cannot tell "quiet week" from "the model collapsed
+        # every new promise into an existing one" — see ExtractionCounts.
+        "commitments_linked": summary.commitments_linked,
+        "commitments_flagged": summary.commitments_flagged,
+        "extractions_rejected": summary.extractions_rejected,
         "latest_sent_at": summary.latest_sent_at.isoformat() if summary.latest_sent_at else None,
     }
 
