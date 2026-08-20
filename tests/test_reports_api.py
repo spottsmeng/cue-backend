@@ -671,3 +671,87 @@ async def test_scheduled_runner_generates_a_scheduled_snapshot(
     # Running again immediately must not double-fire within the same hour.
     generated_again = await run_due_report_schedules()
     assert generated_again == 0
+
+
+# --- the review queue is reachable end-to-end ------------------------------
+
+
+@pytest.mark.asyncio
+async def test_linked_price_claim_reaches_the_review_queue_and_names_its_reason(
+    app_session, authed_org_and_project
+):
+    """The trust surface, proven end to end rather than by inspection.
+
+    A vendor message that links to an already-logged commitment and asserts a
+    new price is never auto-applied (app/ledger/extractor.py's
+    `_attach_evidence_to_existing`). This proves the other half: that
+    refusing to apply it does not mean burying it. The commitment has to
+    surface in the Living WIP report's outstanding_approvals — the
+    "Outstanding Approvals" list a PM actually reads — and the claim itself
+    has to be legible in the decision log, not merely present in a table
+    nothing renders.
+
+    `outstanding_approvals` had no coverage at all before this: the review
+    queue is the one surface the product's "every row is either trustworthy
+    or visibly marked" claim rests on.
+    """
+    from app.ledger.context import load_open_commitment_context
+    from app.ledger.extractor import extract_case
+    from tests.test_extractor import CONTEXT, FakeModelClient, _item, make_case
+
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+
+    first = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("screen install confirmed"),
+        client=FakeModelClient({"commitments": [_item(evidence_span="screen install")]}),
+    )
+    await app_session.flush()
+    existing = first.created[0]
+    assert existing.verification_state == "auto"  # not in the queue yet
+
+    ledger_context = await load_open_commitment_context(app_session, project_id=project_id)
+    await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("the screen install is now 6200 not 5000"),
+        client=FakeModelClient({"commitments": [_item(
+            act_type="renegotiate", evidence_span="screen install",
+            relates_to="C1", amount=6200, currency="SGD",
+        )]}),
+        ledger_context=ledger_context,
+    )
+    await app_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        report = await client.get(
+            f"/projects/{project_id}/report/current", headers=_headers(admin_token)
+        )
+        queue = await client.get(
+            f"/projects/{project_id}/commitments?verification_state=pending_verification",
+            headers=_headers(admin_token),
+        )
+
+    assert report.status_code == 200, report.text
+    log = report.json()["decision_and_approval_log"]
+
+    # 1. It is in the queue a PM reads.
+    approvals = log["outstanding_approvals"]
+    assert str(existing.id) in [a["commitment_id"] for a in approvals]
+
+    # 2. The queue says *why*, rather than just listing the row.
+    linked = next(
+        d for d in log["decisions"]
+        if d["commitment_id"] == str(existing.id) and d["action"] == "evidence_added"
+    )
+    assert linked["detail"]["unapplied_claims"] == {
+        "amount": 6200, "currency": "SGD", "act_type": "renegotiate",
+    }
+    assert linked["detail"]["flagged_reason"] == "unapplied_claims"
+
+    # 3. The same row is reachable through the list endpoint's own filter.
+    assert str(existing.id) in [c["id"] for c in queue.json()]
+
+    # 4. And the price was still never applied.
+    assert [c["amount"] for c in queue.json() if c["id"] == str(existing.id)] == [None]
