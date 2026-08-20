@@ -25,6 +25,7 @@ from app.capture.normalise import normalise_and_ingest
 from app.capture.schema import RawCapturedMessage
 from app.core.db import org_scoped_transaction
 from app.documents.storage import StorageBackend, get_storage_backend
+from app.ledger.context import load_open_commitment_context
 from app.ledger.extractor import RejectedExtraction, extract_case
 from app.llm.client import ModelClient
 from app.models import Channel, ChannelType, Evidence, Party, Project
@@ -66,16 +67,22 @@ async def _channel_capability(session: AsyncSession, channel_type_code: str) -> 
 
 
 async def _finalise_message_evidence(
-    session: AsyncSession, *, message: Message, commitment_ids: list[uuid.UUID], storage: StorageBackend
+    session: AsyncSession, *, message: Message, evidence_ids: list[uuid.UUID], storage: StorageBackend
 ) -> None:
-    """Two things extract_case itself (untouched — CLAUDE.md/Prompt 11b)
-    has no way to do, since it only ever sees a case dict, never a real
-    Message row:
+    """Two things extract_case has no way to do, since it only ever sees a
+    case dict, never a real Message row:
 
     1. Backfills `Evidence.message_id` to this real Message — item 1's own
        point (a real FK, replacing "Points at the future Message/capture
        table — not modelled yet") is hollow if nothing ever actually sets
        the column on a real-capture Evidence row.
+
+       Keyed on the Evidence ids this extraction just wrote, not on its
+       commitment ids. Those were the same thing only while a commitment
+       could never gain evidence from more than one message; extraction's
+       `relates_to` path (a later message citing an already-logged
+       commitment) makes that false, and selecting by commitment_id would
+       re-point the *earlier* message's evidence at this one.
     2. FR-VOI-05 ("make it playable from any evidence link") /
        FR-VOI-04 (per-utterance confidence, "voice only"): if this message
        came from a voice note, every Evidence row extract_case just wrote
@@ -84,10 +91,10 @@ async def _finalise_message_evidence(
        (copied from the processed MessageMedia row) — untouched for a
        text-origin message.
     """
-    if not commitment_ids:
+    if not evidence_ids:
         return
     evidence_rows = (
-        await session.execute(select(Evidence).where(Evidence.commitment_id.in_(commitment_ids)))
+        await session.execute(select(Evidence).where(Evidence.id.in_(evidence_ids)))
     ).scalars().all()
     if not evidence_rows:
         return
@@ -121,16 +128,16 @@ async def extract_from_message(
     message: Message,
     client: ModelClient | None = None,
     storage: StorageBackend | None = None,
+    pinned_commitment_ids: tuple[uuid.UUID, ...] = (),
 ) -> int:
-    """Runs the existing, untouched extraction contract
-    (app/ledger/extractor.py's extract_case) against one real captured
-    Message. Guards against ever extracting the same message twice
-    (`extraction_attempted_at`) — arq's at-least-once redelivery would
-    otherwise be able to re-run this and create duplicate Commitment rows,
-    since extract_case itself has no dedup logic of its own to lean on; that
-    guarantee is this function's job, not extract_case's, and CLAUDE.md /
-    Prompt 11b both place extract_case's own contract off-limits to this
-    session regardless.
+    """Runs the extraction contract (app/ledger/extractor.py's extract_case)
+    against one real captured Message. Guards against ever extracting the
+    same message twice (`extraction_attempted_at`) — arq's at-least-once
+    redelivery would otherwise be able to re-run this and create duplicate
+    Commitment rows. That guarantee is this function's job: extract_case
+    dedups *within* one message (a returned item pointing at an
+    already-logged commitment links to it instead of duplicating it) but has
+    no notion of the same message arriving twice.
 
     Returns the number of commitments created — always 0 for a text-less
     message (nothing to extract from; still marks the attempt so it's never
@@ -140,6 +147,20 @@ async def extract_from_message(
     client (Ollama/Anthropic per .env) — overridable so tests exercise this
     module without a live model, the same override extract_case itself
     already supports for the same reason.
+
+    `pinned_commitment_ids` are commitments that must appear in the
+    already-logged context extraction is shown, whatever the recency window
+    would otherwise select — see ingest_raw_message, which pins the
+    commitment a write-back reply was just matched to.
+
+    The extraction itself runs inside a SAVEPOINT (`session.begin_nested()`,
+    the same isolation app/capture/normalise.py and app/llm/cost.py already
+    use). extract_case verifies before it writes, so it does not leave
+    partial state of its own — but the Message row was inserted in this same
+    transaction, and NFR-AVL-02 ("capture must never lose a message") means
+    a failure anywhere under extraction must not be able to take the captured
+    message down with it. The savepoint is what makes "roll back the
+    extraction, keep the message" expressible at all.
     """
     if message.extraction_attempted_at is not None:
         return 0
@@ -152,6 +173,9 @@ async def extract_from_message(
     party_name = await _party_display_name(session, message.author_party_id)
     capability = await _channel_capability(session, channel.type)
     context = await build_project_context(session, project)
+    ledger_context = await load_open_commitment_context(
+        session, project_id=project.id, pinned_commitment_ids=pinned_commitment_ids
+    )
     case = build_case(
         message,
         channel_type=channel.type,
@@ -161,22 +185,33 @@ async def extract_from_message(
 
     created = 0
     try:
-        commitments = await extract_case(
-            session,
-            project_id=project.id,
-            organisation_id=project.organisation_id,
-            context=context,
-            case=case,
-            client=client,
-        )
-        created = len(commitments)
-        await _finalise_message_evidence(
-            session,
-            message=message,
-            commitment_ids=[c.id for c in commitments],
-            storage=storage or get_storage_backend(),
-        )
+        async with session.begin_nested():
+            outcome = await extract_case(
+                session,
+                project_id=project.id,
+                organisation_id=project.organisation_id,
+                context=context,
+                case=case,
+                client=client,
+                ledger_context=ledger_context,
+            )
+            created = len(outcome.created)
+            await _finalise_message_evidence(
+                session,
+                message=message,
+                evidence_ids=outcome.evidence_ids,
+                storage=storage or get_storage_backend(),
+            )
+            if outcome.linked:
+                # Not a no-op run: the message was read as being *about*
+                # commitments already on the ledger, and each of those gained
+                # an Evidence row rather than the ledger gaining a duplicate.
+                logger.info(
+                    "message %s linked to %d already-logged commitment(s): %s",
+                    message.id, len(outcome.linked), [str(c) for c in outcome.linked],
+                )
     except RejectedExtraction as e:
+        created = 0
         logger.info("extraction rejected for message %s: %s", message.id, e)
     finally:
         message.extraction_attempted_at = datetime.now(dt_timezone.utc)
@@ -218,7 +253,7 @@ async def ingest_raw_message(
     # reasoning-role call (app/writeback/reply.py's own get_client("reasoning")
     # default), a different model role than extraction, same distinction
     # app/llm/factory.py's Role type draws everywhere else in this codebase.
-    await handle_potential_reply(
+    reply = await handle_potential_reply(
         session, project=project, channel_id=channel.id, message=result.message
     )
 
@@ -230,8 +265,17 @@ async def ingest_raw_message(
         message=result.message,
         storage=storage or get_storage_backend(),
     )
+    # A reply that just transitioned a commitment is *about* that commitment.
+    # Extraction still runs — a vendor can answer the question and add a new
+    # promise in the same breath ("yes confirmed, and the frame slips 2 days")
+    # so skipping it outright would lose real commitments — but the matched
+    # commitment is pinned into the already-logged context it is shown, so the
+    # part of the reply that answers the question links to the existing row
+    # instead of being read as a second, duplicate promise.
+    pinned = (reply.commitment_id,) if reply.commitment_id is not None else ()
     created = await extract_from_message(
-        session, project=project, channel=channel, message=result.message, client=client, storage=storage
+        session, project=project, channel=channel, message=result.message, client=client,
+        storage=storage, pinned_commitment_ids=pinned,
     )
     return result.message, True, created, media_processed
 

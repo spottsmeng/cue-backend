@@ -15,6 +15,11 @@ Doors: {doors}
 Known milestones:
 {milestones}
 
+ALREADY LOGGED FOR THIS PROJECT
+Commitments already on the ledger. A message that chases, confirms, questions or discusses the
+consequences of one of these is about that commitment — it is not a new one.
+{open_commitments}
+
 MESSAGE
 Channel: {channel}
 From: {party}
@@ -51,6 +56,9 @@ RULES
   written in the message (e.g. "Golden Sound & Light"). Null when the message does not name a
   specific vendor. Never fill this with the sender's own name — it names who the commitment is
   ABOUT, not who is speaking.
+- relates_to names the ALREADY LOGGED commitment this message is about — chasing it, confirming
+  it, questioning it, or discussing its effect on the schedule. Set it to null only when this is
+  a genuinely new commitment. Never emit a new commitment for something already on that list.
 - price_changed is true only when this message changes a price. Null when price is not discussed.
 - amount is a number without separators. currency is a 3-letter code (新币 / SGD -> "SGD").
 - confidence is your own 0-1 estimate for that commitment.

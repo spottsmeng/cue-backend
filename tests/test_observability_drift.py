@@ -143,3 +143,52 @@ async def test_repeated_unchanged_regression_does_not_duplicate_the_risk(
         )
     ).scalars().all()
     assert len(risks) == 1
+
+
+# --- F1 gate (Over- and Under-splitting…pdf) --------------------------------
+
+
+@pytest.mark.asyncio
+async def test_f1_collapse_alerts_even_when_field_accuracy_holds(
+    monkeypatch, app_session, org_and_project
+):
+    """The blind spot this gate exists to close. Field accuracy's denominator
+    is the labelled fields, so a commitment the model invented — matching no
+    expected commitment at all — adds nothing to it. A model that fabricates
+    an extra commitment on every message therefore scores an unchanged field
+    accuracy, which is exactly the failure that destroys trust in a ledger.
+    """
+    monkeypatch.setattr(drift, "EXTRACTION_F1_BASELINE", 0.80)
+
+    async def fake_run(args, env=None):
+        return {
+            "overall_field_accuracy": 84.0,  # comfortably above its own gate
+            "f1": 0.55, "precision": 0.42, "recall": 0.98, "spurious": 41,
+            "by_band": {"easy": 84.0}, "n_cases": 20,
+        }
+
+    monkeypatch.setattr(drift, "_run_subprocess_json", fake_run)
+    result = await drift.run_extraction_drift_check()
+
+    assert result["accuracy_regressed"] is False
+    assert result["f1_regressed"] is True
+    assert result["regressed"] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_f1_is_treated_as_unavailable_not_as_zero(
+    monkeypatch, app_session, org_and_project
+):
+    """An older cue-eval revision reports no f1. Reading that absence as a
+    score of zero would alert every project on a harness/app version skew."""
+    monkeypatch.setattr(drift, "EXTRACTION_F1_BASELINE", 0.80)
+
+    async def fake_run(args, env=None):
+        return {"overall_field_accuracy": 84.0, "by_band": {"easy": 84.0}, "n_cases": 10}
+
+    monkeypatch.setattr(drift, "_run_subprocess_json", fake_run)
+    result = await drift.run_extraction_drift_check()
+
+    assert result["f1"] is None
+    assert result["f1_regressed"] is False
+    assert result["regressed"] is False

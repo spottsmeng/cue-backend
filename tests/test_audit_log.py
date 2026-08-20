@@ -209,7 +209,7 @@ async def test_extraction_writes_an_audit_entry(app_session, org_and_project):
                 FAKE_LLM_USAGE,
             )
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session,
         project_id=project_id,
         organisation_id=org_id,
@@ -221,7 +221,7 @@ async def test_extraction_writes_an_audit_entry(app_session, org_and_project):
 
     row = (
         await app_session.execute(
-            select(AuditLog).where(AuditLog.commitment_id == created[0].id)
+            select(AuditLog).where(AuditLog.commitment_id == outcome.created[0].id)
         )
     ).scalar_one()
     assert row.action == "created"

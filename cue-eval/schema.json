@@ -17,6 +17,10 @@
           "currency": { "type": ["string", "null"] },
           "price_changed": { "type": ["boolean", "null"] },
           "counterparty_name": { "type": ["string", "null"] },
+          "relates_to": {
+            "type": ["string", "null"],
+            "description": "Reference (e.g. \"C1\") of the already-logged commitment this message is about, from the ALREADY LOGGED list. Null only when this is a genuinely new commitment. Narrowed to an enum of the refs actually supplied at call time — app/ledger/schema.py's build_extraction_json_schema."
+          },
           "evidence_span": { "type": "string" },
           "confidence": { "type": "number" }
         },

@@ -1,3 +1,4 @@
+import copy
 import json
 from pathlib import Path
 from typing import Literal
@@ -30,6 +31,7 @@ class ExtractedCommitment(BaseModel):
     currency: str | None = None
     price_changed: bool | None = None
     counterparty_name: str | None = None
+    relates_to: str | None = None
     evidence_span: str
     confidence: float
 
@@ -42,6 +44,31 @@ def load_extraction_json_schema() -> dict:
     """The raw JSON Schema passed to the model as a hard output constraint —
     loaded from cue-eval/schema.json, the single tuned source, not duplicated."""
     return json.loads((_CUE_EVAL_DIR / "schema.json").read_text(encoding="utf-8"))
+
+
+def build_extraction_json_schema(allowed_refs: list[str] | None = None) -> dict:
+    """cue-eval/schema.json with `relates_to` narrowed to the refs actually
+    offered on this call.
+
+    CLAUDE.md's first hard rule is "Enforce, don't ask. Output shape is
+    controlled by JSON Schema — enums, typed nulls, required fields. Never by
+    asking politely in the prompt." A model pointing at an already-logged
+    commitment is exactly that kind of constraint: the set of things it may
+    point at is known at call time and is small, so it belongs in the schema
+    the decoder is constrained by, not in a sentence asking the model to only
+    use listed references.
+
+    With no refs supplied (a project with an empty ledger, or a caller that
+    does not load context at all) the enum collapses to `[None]` — the field
+    becomes structurally impossible to fill, rather than being left open for
+    the model to invent a plausible-looking "C1" that refers to nothing. The
+    static file keeps the wider `["string", "null"]` type so it stays readable
+    and valid on its own; this narrowing is per-call, never written back.
+    """
+    schema = copy.deepcopy(load_extraction_json_schema())
+    relates_to = schema["properties"]["commitments"]["items"]["properties"]["relates_to"]
+    relates_to["enum"] = [None, *(allowed_refs or [])]
+    return schema
 
 
 def load_extraction_prompt_template() -> str:

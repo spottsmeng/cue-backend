@@ -34,6 +34,14 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
     "pytest-env>=1.7.0",
+    # Shuffles test order every run, so a test that only passes because an
+    # earlier one left the right state behind fails immediately instead of
+    # accumulating silently. Added after eighteen tests across foresight/,
+    # lifecycle and parties/ were found failing only in a full run, and only
+    # once enough earlier tests had churned the connection pool — see
+    # tests/conftest.py's app_session docstring for that root cause. Each run
+    # prints its seed; reproduce one with `--randomly-seed=<seed>`.
+    "pytest-randomly>=4.1.0",
 ]
 
 [tool.pytest.ini_options]

@@ -1,0 +1,200 @@
+"""app/ledger/context.py — the already-logged-commitments lookup that
+extraction is given before it reads a new message, and app/ledger/schema.py's
+per-call narrowing of `relates_to` to the refs that lookup actually returned.
+
+This is the half of the over-splitting fix that no prompt wording could
+supply: the reason a message like "can we get written confirmation the 4pm
+start still lands?" was read as a new promise is that the fact making it a
+restatement lives in an earlier message the model was never shown.
+"""
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+from sqlalchemy import select
+
+from app.ledger.context import (
+    LedgerContextItem,
+    load_open_commitment_context,
+    relates_to_refs,
+    render_ledger_context,
+    resolve_ref,
+)
+from app.ledger.schema import build_extraction_json_schema
+from app.models import Commitment, OntologyTerm, Party
+from tests.conftest import set_org_context
+
+
+async def _make_commitment(
+    session, org_id, project_id, *, name, state="proposed",
+    vendor="Ah Seng Production", created_at=None,
+):
+    party = (
+        await session.execute(
+            select(Party).where(Party.organisation_id == org_id, Party.display_name == vendor)
+        )
+    ).scalar_one_or_none()
+    if party is None:
+        party = Party(organisation_id=org_id, display_name=vendor, type="vendor_org")
+        session.add(party)
+        await session.flush()
+    internal = Party(organisation_id=org_id, display_name=f"internal {name}", type="internal_staff")
+    session.add(internal)
+    act = (
+        await session.execute(
+            select(OntologyTerm).where(
+                OntologyTerm.category == "commitment_act", OntologyTerm.code == "commit"
+            )
+        )
+    ).scalars().first()
+    await session.flush()
+    commitment = Commitment(
+        project_id=project_id, party_id=party.id, counterparty_id=internal.id,
+        act_type_id=act.id, state=state, deliverable_en=name, deliverable_original=name,
+        confidence=0.9, field_confidence={},
+    )
+    if created_at is not None:
+        commitment.created_at = created_at
+    session.add(commitment)
+    await session.flush()
+    return commitment
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_commitments_are_never_offered_back_to_the_model(
+    app_session, org_and_project
+):
+    """"withdrawn" is the one state meaning "a human took this off the
+    ledger" — offering it back invites re-opening something already retired."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    await _make_commitment(app_session, org_id, project_id, name="live one")
+    await _make_commitment(app_session, org_id, project_id, name="retired one", state="withdrawn")
+
+    items = await load_open_commitment_context(app_session, project_id=project_id)
+    assert [i.deliverable_en for i in items] == ["live one"]
+
+
+@pytest.mark.asyncio
+async def test_pinned_commitment_survives_the_recency_window(app_session, org_and_project):
+    """app/capture/pipeline.py pins the commitment a write-back reply was just
+    matched to. Without the pin, a busy project pushes it out of the window and
+    extraction re-reads the same reply as a brand-new promise — the duplicate
+    this pin exists to prevent."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    oldest = await _make_commitment(
+        app_session, org_id, project_id, name="the pinned one", created_at=base
+    )
+    for i in range(5):
+        await _make_commitment(
+            app_session, org_id, project_id, name=f"newer {i}",
+            created_at=base + timedelta(hours=i + 1),
+        )
+
+    unpinned = await load_open_commitment_context(app_session, project_id=project_id, limit=3)
+    assert oldest.id not in [i.commitment_id for i in unpinned]
+
+    pinned = await load_open_commitment_context(
+        app_session, project_id=project_id, limit=3, pinned_commitment_ids=(oldest.id,)
+    )
+    assert oldest.id in [i.commitment_id for i in pinned]
+    # Refs must still be dense and unique after the pin is spliced in, or the
+    # schema enum and the rendered list disagree about what "C2" means.
+    refs = relates_to_refs(pinned)
+    assert refs == [f"C{n}" for n in range(1, len(pinned) + 1)]
+
+
+@pytest.mark.asyncio
+async def test_another_projects_commitments_are_never_in_context(app_session, org_and_project):
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    await _make_commitment(app_session, org_id, project_id, name="ours")
+
+    from app.models import Project
+    ours = (
+        await app_session.execute(select(Project).where(Project.id == project_id))
+    ).scalar_one()
+    other = Project(
+        organisation_id=org_id, vertical_id=ours.vertical_id,
+        name="Other project", timezone="Asia/Singapore",
+    )
+    app_session.add(other)
+    await app_session.flush()
+    await _make_commitment(app_session, org_id, other.id, name="theirs")
+
+    items = await load_open_commitment_context(app_session, project_id=project_id)
+    assert [i.deliverable_en for i in items] == ["ours"]
+
+
+def test_empty_context_renders_explicitly_not_as_a_blank():
+    """A bare blank under a heading reads to a model as a truncated prompt,
+    and an empty ledger is the common case on a new project."""
+    assert "none" in render_ledger_context([])
+
+
+def test_relates_to_enum_is_closed_to_what_was_actually_offered():
+    """CLAUDE.md: "Enforce, don't ask." The set of commitments the model may
+    point at is known at call time, so it belongs in the schema the decoder is
+    constrained by — not in a sentence asking it to only use listed refs."""
+    schema = build_extraction_json_schema(["C1", "C2"])
+    enum = schema["properties"]["commitments"]["items"]["properties"]["relates_to"]["enum"]
+    assert enum == [None, "C1", "C2"]
+
+    # No context at all: the field becomes structurally impossible to fill,
+    # rather than left open for the model to invent a plausible "C1".
+    empty = build_extraction_json_schema([])
+    assert empty["properties"]["commitments"]["items"]["properties"]["relates_to"]["enum"] == [None]
+
+    # Narrowing is per-call and must never be written back to the shared dict.
+    from app.ledger.schema import load_extraction_json_schema
+    on_disk = load_extraction_json_schema()
+    assert "enum" not in on_disk["properties"]["commitments"]["items"]["properties"]["relates_to"]
+
+
+def test_resolve_ref_rejects_a_ref_that_was_never_offered():
+    assert resolve_ref([], "C1") is None
+    assert resolve_ref([], None) is None
+
+
+def test_eval_harness_renders_ledger_context_identically_to_production():
+    """cue-eval/run_eval.py hand-duplicates render_ledger_context because it
+    is deliberately stdlib-only (no app package, no database). The whole value
+    of that harness rests on it sending what production sends, so the
+    duplication is pinned here rather than left to a comment: if either
+    renderer changes, this fails.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    eval_path = Path(__file__).resolve().parents[1] / "cue-eval" / "run_eval.py"
+    spec = importlib.util.spec_from_file_location("cue_eval_run_eval", eval_path)
+    run_eval = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run_eval)
+
+    import uuid as _uuid
+
+    items = [
+        LedgerContextItem(
+            ref="C1", commitment_id=_uuid.uuid4(), vendor="Ah Seng Production",
+            deliverable_en="screen install", due_at="2026-06-22T16:00:00+08:00",
+            amount=None, state="proposed",
+        ),
+        LedgerContextItem(
+            ref="C2", commitment_id=_uuid.uuid4(), vendor="Bloomworks",
+            deliverable_en="main stage flowers", due_at=None,
+            amount="450.00 SGD", state="committed",
+        ),
+    ]
+    case = {
+        "ledger_context": [
+            {"vendor": "Ah Seng Production", "deliverable_en": "screen install",
+             "due_at": "2026-06-22T16:00:00+08:00", "amount": None, "state": "proposed"},
+            {"vendor": "Bloomworks", "deliverable_en": "main stage flowers",
+             "due_at": None, "amount": "450.00 SGD", "state": "committed"},
+        ]
+    }
+
+    assert render_ledger_context(items) == run_eval.render_ledger_context(case)
+    assert render_ledger_context([]) == run_eval.render_ledger_context({})

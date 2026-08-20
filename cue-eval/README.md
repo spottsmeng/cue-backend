@@ -1,6 +1,6 @@
 # CUE extraction eval
 
-Ten hand-labelled vendor messages that test the commitment-extraction tier. Runs against a local
+Hand-labelled vendor and internal messages that test the commitment-extraction tier. Runs against a local
 Ollama model today and against a hosted model later, with the same cases and the same scoring —
 so a number measured now is comparable to a number measured in production.
 
@@ -21,12 +21,12 @@ python3 run_eval.py --provider anthropic # needs ANTHROPIC_API_KEY
 
 | File | What it is |
 |---|---|
-| `cases.json` | Project context + 10 labelled cases with expected extractions |
+| `cases.json` | Project context + labelled cases with expected extractions. A case may also carry `ledger_context`: the commitments already logged when that message arrived, rendered into the prompt exactly as `app/ledger/context.py` renders the real thing |
 | `schema.json` | The JSON Schema passed to the model as a hard output constraint |
 | `prompt.txt` | The extraction prompt template. **This is the artefact you tune** |
 | `run_eval.py` | Runner and scorer |
 
-## The four bands
+## The bands
 
 | Band | Cases | Tests |
 |---|---|---|
@@ -34,15 +34,37 @@ python3 run_eval.py --provider anthropic # needs ANTHROPIC_API_KEY
 | `code-switched` | T05–T06 | Mixed EN/中文 in one message — normal in this domain |
 | `multi` | T07–T08 | One message containing 2–3 distinct commitments |
 | `ambiguous-date` | T09–T10 | Relative dates: "next Tuesday", 后天 |
+| `singlish` | S01–S05 | Sentence-final particles, bare-verb future, "X or not?" |
+| `internal-channel-vendor` | IC01–IC02 | Internal channel; the vendor is named in the text, never the sender |
+| `consequence-discussion` | CD01–CD02 | Staff discussing an already-logged commitment — must not become a new one |
+| `merged-vendor` | CD03 | Two vendors, two deliverables, one message — must split into two |
 
 ## Scoring
 
-- **n** — commitments returned / expected. Over-splitting is the most common failure
+Two numbers, because extraction fails in two opposite directions and one metric cannot see both.
+
+- **n** — commitments returned / expected
 - **count** — runs where the count was exactly right
-- **fields** — per-field accuracy against the labelled expectation
+- **fields** — per-field accuracy against the labelled expectation. Its denominator is the
+  *labelled* fields, which makes it a recall-shaped number: it penalises a missed commitment
+  and a wrong field, and is **structurally blind to an invented one** — an extra returned
+  commitment matches nothing, so it adds nothing to the denominator and cannot lower the score.
+  Kept because CLAUDE.md's baselines and `app/observability/drift.py`'s gate are recorded in it
+- **P / R** — precision and recall over the returned *set*. An expected and a returned commitment
+  count as the same one when at least half the labelled fields match (the conventional
+  partial-match threshold for set-level extraction scoring); anything returned that matches
+  nothing is **spurious**, anything expected that was not found is **missed**. Precision is the
+  half `fields` cannot see, and inventing commitments is the failure that most directly destroys
+  trust in a ledger
+- **spurious / missed** — the raw counts behind P and R, summed across runs
 - **spans** — every `evidence_span` returned is a genuine substring of the message.
   This one must stay at 100%; it is the provenance guarantee (PRD FR-LED-04) and a
   failure here means the model is inventing evidence
+
+Expected/returned commitments are matched by an **exhaustive** best-total alignment, not greedily
+in label order — greedy can let an early expected item consume a candidate a later one needed
+more, understating a correct extraction. Alignment only chooses the pairing; it never changes how
+a pair is scored.
 
 ## Baseline — qwen2.5:14b, 6 Aug 2026
 
@@ -97,7 +119,7 @@ fixing.
 - **Never cite an Ollama figure to Pico.** Local numbers are for iteration. The thresholds in the
   proposal (0.92 commitment recall, 0.97 monetary precision) are measured against the models you
   actually ship, on the labelled corpus that comes out of discovery
-- **These 10 cases are synthetic.** They are a smoke test and a regression gate, not an accuracy
+- **These cases are synthetic.** They are a smoke test and a regression gate, not an accuracy
   measurement. The real corpus comes from channel forensics during discovery — see proposal §4.1
 
 ## Where this goes next

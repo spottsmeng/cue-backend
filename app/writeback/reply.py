@@ -41,6 +41,12 @@ Does this reply clearly answer the question, and if so, what does it imply about
 class ReplyHandlingResult:
     matched_outbound: bool
     outcome: str | None = None  # "transitioned" | "escalated" | None (no match)
+    # Which commitment the reply was about, when one was matched. The caller
+    # (app/capture/pipeline.py) feeds this into extraction's already-logged
+    # context so the very next step does not read the same reply a second
+    # time as a brand-new promise — the message has, by construction, just
+    # been shown to be about this existing commitment.
+    commitment_id: uuid.UUID | None = None
 
 
 async def _find_pending_outbound(
@@ -172,7 +178,9 @@ async def handle_potential_reply(
             session, project=project, outbound=outbound, commitment=commitment, message=message,
             reason=f"reply not parseable: {parsed.reasoning}" if parsed.reasoning else "reply not parseable",
         )
-        return ReplyHandlingResult(matched_outbound=True, outcome="escalated")
+        return ReplyHandlingResult(
+            matched_outbound=True, outcome="escalated", commitment_id=commitment.id
+        )
 
     from_state = commitment.state
     try:
@@ -182,7 +190,9 @@ async def handle_potential_reply(
             session, project=project, outbound=outbound, commitment=commitment, message=message,
             reason=f"reply implied an invalid transition {from_state!r} -> {parsed.to_state!r}: {e}",
         )
-        return ReplyHandlingResult(matched_outbound=True, outcome="escalated")
+        return ReplyHandlingResult(
+            matched_outbound=True, outcome="escalated", commitment_id=commitment.id
+        )
 
     commitment.state = parsed.to_state
     await session.flush()  # the DB trigger checks this too, same defense-in-depth as everywhere else
@@ -207,4 +217,6 @@ async def handle_potential_reply(
     )
     await recompute_vendor_metrics(session, commitment.party_id)
 
-    return ReplyHandlingResult(matched_outbound=True, outcome="transitioned")
+    return ReplyHandlingResult(
+        matched_outbound=True, outcome="transitioned", commitment_id=commitment.id
+    )

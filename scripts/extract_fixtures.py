@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.capture.fixtures import load_fixture_cases
 from app.core.db import async_session_factory
+from app.ledger.context import load_open_commitment_context
 from app.ledger.extractor import RejectedExtraction, extract_case
 from app.models import Organisation, Project, Vertical
 
@@ -62,19 +63,35 @@ async def main() -> None:
         print("  " + "-" * 60)
 
         created_total = 0
+        linked_total = 0
         rejected_total = 0
         for case in cases:
             try:
-                created = await extract_case(
+                # Cases are extracted in file order against a ledger that is
+                # already filling up, exactly as a real channel backlog is
+                # (app/capture/pipeline.py's ingest_channel_backlog processes
+                # messages sequentially). So a later fixture case discussing
+                # an earlier one's commitment sees it in context here too —
+                # without this the script would exercise a strictly easier
+                # problem than production does.
+                ledger_context = await load_open_commitment_context(
+                    session, project_id=project_id
+                )
+                outcome = await extract_case(
                     session,
                     project_id=project_id,
                     organisation_id=org_id,
                     context=context,
                     case=case,
+                    ledger_context=ledger_context,
                 )
                 await session.commit()
-                created_total += len(created)
-                print(f"  {case['id']:<5} {case['band']:<16} {len(created)} commitment(s)")
+                created_total += len(outcome.created)
+                linked_total += len(outcome.linked)
+                detail = f"{len(outcome.created)} commitment(s)"
+                if outcome.linked:
+                    detail += f", {len(outcome.linked)} linked to existing"
+                print(f"  {case['id']:<5} {case['band']:<16} {detail}")
             except RejectedExtraction as e:
                 await session.rollback()
                 rejected_total += 1
@@ -82,6 +99,7 @@ async def main() -> None:
 
         print("  " + "-" * 60)
         print(f"  total commitments created: {created_total}")
+        print(f"  total linked to existing:  {linked_total}")
         print(f"  total cases rejected:      {rejected_total}\n")
 
 

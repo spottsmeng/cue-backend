@@ -16,7 +16,7 @@ CUE extraction eval — stdlib only, no pip install required.
                                                 # human output is unchanged)
 """
 
-import argparse, json, os, statistics, sys, time, urllib.error, urllib.request
+import argparse, itertools, json, os, statistics, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -29,6 +29,43 @@ ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 
 # ----------------------------------------------------------------- prompt ---
+def render_ledger_context(case):
+    """A case's optional "ledger_context": the commitments already logged when
+    this message arrived, rendered exactly as app/ledger/context.py's
+    render_ledger_context renders the real thing. Kept as a hand-written
+    duplicate rather than an import for the same reason this whole script is
+    stdlib-only — it must run with no app package and no database — but the
+    two formats have to stay identical or the eval stops measuring what
+    production sends. Cases without the key get the same "(none)" the real
+    renderer produces for an empty ledger.
+    """
+    items = case.get("ledger_context") or []
+    if not items:
+        return "  (none — nothing has been logged for this project yet)"
+    lines = []
+    for i, item in enumerate(items, start=1):
+        parts = ["{}: {}".format(item["vendor"], item["deliverable_en"])]
+        if item.get("due_at"):
+            parts.append("due {}".format(item["due_at"]))
+        if item.get("amount"):
+            parts.append(item["amount"])
+        parts.append(item.get("state", "proposed"))
+        lines.append("  C{} — {}".format(i, ", ".join(parts)))
+    return "\n".join(lines)
+
+
+def case_schema(case):
+    """SCHEMA with `relates_to` narrowed to the refs this case actually offers
+    — the same per-call enum injection app/ledger/schema.py's
+    build_extraction_json_schema does in production. With no context the enum
+    is [None], so the model cannot name a commitment that does not exist."""
+    schema = json.loads(json.dumps(SCHEMA))  # cheap deep copy, stdlib only
+    n = len(case.get("ledger_context") or [])
+    props = schema["properties"]["commitments"]["items"]["properties"]
+    props["relates_to"]["enum"] = [None] + ["C{}".format(i) for i in range(1, n + 1)]
+    return schema
+
+
 def build_prompt(case):
     ctx = CASES["project_context"]
     milestones = "\n".join(
@@ -36,6 +73,7 @@ def build_prompt(case):
     )
     weekday = case.get("sent_weekday")
     return TEMPLATE.format(
+        open_commitments=render_ledger_context(case),
         project=ctx["project"],
         client=ctx["client"],
         timezone=ctx["timezone"],
@@ -67,20 +105,20 @@ def post(url, payload, headers, timeout=300):
         return json.loads(r.read().decode("utf-8"))
 
 
-def call_ollama(prompt, model):
+def call_ollama(prompt, model, schema=None):
     body = {
         "model": model,
         "prompt": prompt,
         "stream": False,
         "keep_alive": "2h",
-        "format": SCHEMA,
+        "format": schema or SCHEMA,
         "options": {"num_ctx": 16384, "temperature": 0},
     }
     out = post(OLLAMA_URL, body, {"Content-Type": "application/json"})
     return out["response"]
 
 
-def call_anthropic(prompt, model):
+def call_anthropic(prompt, model, schema=None):
     key = os.environ.get("ANTHROPIC_API_KEY")
     if not key:
         sys.exit("ANTHROPIC_API_KEY is not set.")
@@ -88,7 +126,7 @@ def call_anthropic(prompt, model):
         "model": model,
         "max_tokens": 4096,
         "messages": [{"role": "user", "content": prompt}],
-        "output_config": {"format": {"type": "json_schema", "schema": SCHEMA}},
+        "output_config": {"format": {"type": "json_schema", "schema": schema or SCHEMA}},
     }
     headers = {
         "content-type": "application/json",
@@ -137,37 +175,154 @@ def match_one(exp, got):
     return hits, total
 
 
+# A returned commitment has to match at least this fraction of an expected
+# commitment's labelled fields before the two are treated as *the same
+# commitment* for precision/recall. Below it, the pair is not a detection at
+# all: the expected one counts as missed, the returned one as spurious. 0.5 is
+# the conventional partial-match threshold for set-level extraction scoring
+# (MUC/ACE-style), chosen so that e.g. matching only `act_type` out of
+# {act_type, due_at, deliverable_contains} is not scored as having found that
+# commitment.
+_MATCH_THRESHOLD = 0.5
+# Above this many items on either side, the exhaustive alignment below is
+# skipped for the greedy one. Real cases top out at 3 expected / a handful
+# returned, so this is a guard against a pathological model response
+# (hundreds of items), not a limit anything normal hits.
+_MAX_EXACT_ALIGNMENT = 7
+
+
+def _pair_matrix(expected, got):
+    """matrix[i][j] = (hits, total) for expected item i against returned item j."""
+    return [[match_one(e, c) for c in got] for e in expected]
+
+
+def _align(expected, got):
+    """One-to-one assignment of expected -> returned items, maximising total
+    field hits. Returns a list, one entry per expected item, holding the index
+    of the returned item it was matched to (or None if unmatched).
+
+    Exhaustive rather than greedy. Greedy resolves each expected item against
+    the best remaining candidate *in label order*, which can consume a
+    candidate that a later expected item needed more — understating a
+    correct extraction. Both are heuristics for the same objective; with the
+    case sizes here (<=3 expected) the exhaustive one is a few hundred
+    permutations, so there is no reason to approximate it.
+
+    Note this only changes which pairing is chosen, never how a pair is
+    scored — so a field-accuracy number from this function can be equal to or
+    higher than the greedy one it replaces, never lower.
+    """
+    matrix = _pair_matrix(expected, got)
+    n_exp, n_got = len(expected), len(got)
+    if not n_exp or not n_got:
+        return [None] * n_exp
+
+    if n_exp <= _MAX_EXACT_ALIGNMENT and n_got <= _MAX_EXACT_ALIGNMENT:
+        best_total, best_assignment = -1, [None] * n_exp
+        for combo in itertools.permutations(range(n_got), min(n_exp, n_got)):
+            assignment = list(combo) + [None] * (n_exp - len(combo))
+            total = sum(matrix[i][j][0] for i, j in enumerate(assignment) if j is not None)
+            if total > best_total:
+                best_total, best_assignment = total, assignment
+        return best_assignment
+
+    assignment, taken = [], set()
+    for i in range(n_exp):
+        best_j, best_h = None, -1
+        for j in range(n_got):
+            if j in taken:
+                continue
+            if matrix[i][j][0] > best_h:
+                best_j, best_h = j, matrix[i][j][0]
+        if best_j is not None:
+            taken.add(best_j)
+        assignment.append(best_j)
+    return assignment
+
+
 def score(case, parsed):
-    """Greedy best-match each expected commitment against the returned set."""
+    """Set-level scoring of one returned commitment list against the labels.
+
+    Reports two different things on purpose, because they fail in opposite
+    directions and this suite exists to catch both (see cue-eval/README.md's
+    own note on over- vs under-splitting):
+
+    `field_pct` — how well the commitments that *should* exist were filled in.
+    Denominator is the labelled fields, so it is a recall-shaped number: it
+    penalises a missed commitment and a wrong field, but is structurally blind
+    to a *spurious* one, since an extra returned item adds nothing to the
+    denominator. Kept because it is the number CLAUDE.md's own baselines and
+    app/observability/drift.py's regression gate are recorded in.
+
+    `precision` / `recall` / `f1` — how well the returned *set* matches the
+    expected set, counting an unmatched returned item as a false positive.
+    This is the half `field_pct` cannot see: a model that invents a commitment
+    out of a qualifying remark scores an unchanged field_pct and a visibly
+    lower precision. `spurious` / `missed` are the raw counts behind it, for
+    reading a single case.
+    """
     exp = case["expect"]
     got = parsed.get("commitments", []) if isinstance(parsed, dict) else []
+    expected = exp["commitments"]
     count_ok = len(got) == exp["count"]
 
-    hits = total = 0
-    pool = list(got)
-    for e in exp["commitments"]:
-        best, best_score, best_tot = None, -1, 0
-        for cand in pool:
-            h, t = match_one(e, cand)
-            if h > best_score:
-                best, best_score, best_tot = cand, h, t
-        if best is not None:
-            pool.remove(best)
-            hits += best_score
-            total += best_tot
-        else:
-            total += len(e)
-
-    # evidence-span integrity: every returned span must exist in the message
+    # Every returned span must exist verbatim in the message — the one
+    # invariant that is enforced in code downstream too (CLAUDE.md, and
+    # app/ledger/extractor.py's own RejectedExtraction). A case that correctly
+    # returns nothing is vacuously span-clean; one that returns nothing when
+    # something was expected is not being judged on spans at all, so the
+    # historical False for that case is kept rather than quietly relaxed.
     spans_ok = all(
         c.get("evidence_span", "") and c["evidence_span"] in case["message"] for c in got
-    ) if got else False
+    ) if got else (exp["count"] == 0)
+
+    assignment = _align(expected, got)
+
+    hits = total = 0
+    true_positives = 0
+    matched_returned = set()
+    for i, e in enumerate(expected):
+        j = assignment[i]
+        if j is None:
+            total += len(e)
+            continue
+        h, t = match_one(e, got[j])
+        hits += h
+        total += t
+        if t and (h / t) >= _MATCH_THRESHOLD:
+            true_positives += 1
+            matched_returned.add(j)
+
+    spurious = len(got) - len(matched_returned)
+    missed = len(expected) - true_positives
+
+    if exp["count"] == 0:
+        # Nothing to field-match against, so field_pct is just "did it
+        # correctly emit nothing" — falling through would divide 0/0 and score
+        # 0% even when got == [] is right. Precision is likewise undefined with
+        # no expected items; reported as 1.0 when the model correctly returned
+        # none, 0.0 when it invented some, which is what the aggregate below
+        # needs in order to let these cases pull precision down at all.
+        field_pct = 100.0 if count_ok else 0.0
+        precision = 1.0 if not got else 0.0
+        recall = 1.0
+    else:
+        field_pct = (hits / total * 100) if total else 0.0
+        precision = (true_positives / len(got)) if got else 0.0
+        recall = true_positives / len(expected)
+
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
 
     return {
         "count_ok": count_ok,
         "field_hits": hits,
         "field_total": total,
-        "field_pct": (hits / total * 100) if total else 0.0,
+        "field_pct": field_pct,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "spurious": spurious,
+        "missed": missed,
         "spans_ok": spans_ok,
         "n_returned": len(got),
     }
@@ -196,21 +351,25 @@ def main():
 
     print("\n  provider {}   model {}   runs {}   cases {}\n".format(
         args.provider, model, args.runs, len(cases)))
-    print("  {:<5} {:<15} {:>6} {:>7} {:>7} {:>7} {:>8}".format(
-        "id", "band", "n", "count", "fields", "spans", "secs"))
-    print("  " + "-" * 60)
+    print("  {:<5} {:<15} {:>6} {:>7} {:>7} {:>6} {:>5} {:>7} {:>8}".format(
+        "id", "band", "n", "count", "fields", "P", "R", "spans", "secs"))
+    print("  " + "-" * 78)
 
     per_case, all_field_pcts, parse_fail = [], [], 0
     case_spans_ok, case_count_ok = [], []  # one bool per case (majority-of-runs), for --json
+    all_precisions, all_recalls = [], []
+    total_spurious = total_missed = 0
 
     for case in cases:
         prompt = build_prompt(case)
+        schema = case_schema(case)
         run_pcts, run_counts, run_spans, run_times, run_n = [], [], [], [], []
+        run_prec, run_rec, run_spur, run_miss = [], [], [], []
 
         for _ in range(args.runs):
             t0 = time.time()
             try:
-                raw = caller(prompt, model)
+                raw = caller(prompt, model, schema)
             except urllib.error.URLError as e:
                 sys.exit("\n  Cannot reach {}: {}\n  Is Ollama running?".format(args.provider, e))
             elapsed = time.time() - t0
@@ -221,6 +380,8 @@ def main():
                 parse_fail += 1
                 run_pcts.append(0.0); run_counts.append(False); run_spans.append(False)
                 run_times.append(elapsed); run_n.append(0)
+                run_prec.append(0.0); run_rec.append(0.0)
+                run_spur.append(0); run_miss.append(case["expect"]["count"])
                 if args.show:
                     print("\n  --- RAW (unparseable) ---\n{}\n".format(raw))
                 continue
@@ -234,38 +395,61 @@ def main():
             run_spans.append(s["spans_ok"])
             run_times.append(elapsed)
             run_n.append(s["n_returned"])
+            run_prec.append(s["precision"]); run_rec.append(s["recall"])
+            run_spur.append(s["spurious"]); run_miss.append(s["missed"])
 
         avg_pct = statistics.mean(run_pcts)
+        avg_prec, avg_rec = statistics.mean(run_prec), statistics.mean(run_rec)
         all_field_pcts.append(avg_pct)
-        per_case.append((case, avg_pct))
+        all_precisions.append(avg_prec)
+        all_recalls.append(avg_rec)
+        total_spurious += sum(run_spur)
+        total_missed += sum(run_miss)
+        per_case.append((case, avg_pct, avg_prec, avg_rec))
         case_spans_ok.append(sum(run_spans) >= len(run_spans) / 2)
         case_count_ok.append(sum(run_counts) >= len(run_counts) / 2)
 
-        print("  {:<5} {:<15} {:>6} {:>7} {:>6.0f}% {:>7} {:>8.1f}".format(
+        print("  {:<5} {:<15} {:>6} {:>7} {:>6.0f}% {:>6.2f} {:>5.2f} {:>7} {:>8.1f}".format(
             case["id"], case["band"],
             "{:.0f}/{}".format(statistics.mean(run_n), case["expect"]["count"]),
             "{}/{}".format(sum(run_counts), len(run_counts)),
             avg_pct,
+            avg_prec, avg_rec,
             "{}/{}".format(sum(run_spans), len(run_spans)),
             statistics.mean(run_times),
         ))
 
-    print("  " + "-" * 60)
+    macro_p = statistics.mean(all_precisions) if all_precisions else 0.0
+    macro_r = statistics.mean(all_recalls) if all_recalls else 0.0
+    macro_f1 = (2 * macro_p * macro_r / (macro_p + macro_r)) if (macro_p + macro_r) else 0.0
+
+    print("  " + "-" * 78)
     print("  overall field accuracy   {:.1f}%".format(statistics.mean(all_field_pcts)))
+    print("  precision / recall / F1  {:.3f} / {:.3f} / {:.3f}".format(macro_p, macro_r, macro_f1))
+    print("  spurious / missed        {} / {}   (across {} runs)".format(
+        total_spurious, total_missed, args.runs))
+    print("  count exactly right      {}/{} cases".format(sum(case_count_ok), len(case_count_ok)))
     if parse_fail:
         print("  JSON parse failures      {}".format(parse_fail))
 
     by_band = {}
-    for case, pct in per_case:
+    for case, pct, _p, _r in per_case:
         by_band.setdefault(case["band"], []).append(pct)
     print("\n  by band:")
     for band, pcts in by_band.items():
         print("    {:<16} {:.1f}%".format(band, statistics.mean(pcts)))
 
-    weak = [c["id"] for c, p in per_case if p < 70]
+    weak = [c["id"] for c, p, _p, _r in per_case if p < 70]
     if weak:
-        print("\n  below 70% — candidates for frontier-model routing:")
+        print("\n  below 70% field accuracy — candidates for frontier-model routing:")
         print("    " + ", ".join(weak))
+    # Split out separately from `weak`: a case can be 100% on field accuracy
+    # and still be inventing commitments, which is exactly the failure that
+    # number cannot see (see score()'s docstring).
+    impure = [c["id"] for c, _pct, p, _r in per_case if p < 0.99]
+    if impure:
+        print("\n  precision < 1.0 — returning commitments that were not expected:")
+        print("    " + ", ".join(impure))
     print()
 
     if args.json:
@@ -274,6 +458,11 @@ def main():
             "model": model,
             "n_cases": len(cases),
             "overall_field_accuracy": statistics.mean(all_field_pcts) if all_field_pcts else 0.0,
+            "precision": macro_p,
+            "recall": macro_r,
+            "f1": macro_f1,
+            "spurious": total_spurious,
+            "missed": total_missed,
             "by_band": {b: statistics.mean(pcts) for b, pcts in by_band.items()},
             "spans_ok": sum(case_spans_ok),
             "spans_total": len(case_spans_ok),

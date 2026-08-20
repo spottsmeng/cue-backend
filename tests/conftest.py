@@ -234,33 +234,57 @@ async def owner_session(owner_sessionmaker):
 
 @pytest_asyncio.fixture
 async def app_session():
-    """The app's real session factory (app.core.db.async_session_factory),
-    already pointed at cue_test/cue_app by pytest-env — not a parallel
-    reimplementation. This is what RLS-sensitive tests use, since it's a
-    genuinely unprivileged connection, same as production.
+    """The app's real engine (app.core.db.engine), unprivileged `cue_app`
+    role, so RLS applies exactly as it does in production.
 
-    Resets `app.current_org_id` to empty immediately on acquisition — found
-    during M10 (hardening): several call sites across this codebase
-    (app/foresight/worker.py's _set_org_context, scripts/extract_fixtures.py,
-    and now app/observability/drift.py's _notify_all_projects) deliberately
-    use `is_local=false` (SESSION-scoped, not transaction-scoped) when a
-    single session does several sequential commits for one org — correct
-    for that use case, but it means the value survives that session's own
-    close() and can still be sitting on the underlying pooled connection
-    when a *later, unrelated* test's `app_session` happens to draw the same
-    physical connection back out of the pool. Every test already calls
-    set_org_context() for whatever org it actually needs, so this reset
-    changes no test's behavior — it only removes a source of cross-test
-    flakiness that depends on pool checkout order (confirmed reproducible
-    on the pre-M10 codebase too, via an unrelated pair of existing test
-    files — this was latent before this session, not introduced by it)."""
+    **Pinned to one physical connection for the whole test.** This is the
+    fixture's load-bearing property, not an implementation detail.
+
+    `set_org_context` sets `app.current_org_id` with `is_local=false` —
+    connection-scoped, surviving COMMIT — because a test typically commits
+    several times and a transaction-scoped `SET LOCAL` would evaporate at the
+    first one. But SQLAlchemy returns its connection to the pool on every
+    `commit()` and checks one out again on the next statement, which need not
+    be the same physical connection. When it isn't, `app.current_org_id` is
+    unset there, every RLS policy evaluates false, and queries quietly return
+    zero rows — no error, just an empty result the test reads as "the feature
+    didn't work".
+
+    That is why this used to fail only in large runs: with few prior tests the
+    pool hands the same connection straight back and the setting appears to
+    persist. Once enough tests have churned the pool, the post-commit checkout
+    lands elsewhere and the org context is gone. Eighteen tests across
+    foresight/, lifecycle and parties/ failed this way — all of them passing
+    in isolation, which is the signature of the bug rather than a reason to
+    doubt it.
+
+    It is the same failure app/core/db.py's `org_scoped_transaction` docstring
+    describes for the worker pool, in the opposite direction: that one is a
+    stale org id leaking *onto* a pooled connection, this one is a live org id
+    being lost *from* one. Production solves it by re-asserting the context
+    before each unit of work; a test session commits wherever it likes, so
+    here the connection is held instead.
+
+    Still resets `app.current_org_id` to empty on acquisition (the M10 fix,
+    kept): pinning stops the value being lost mid-test, and the reset stops a
+    previous test's value being inherited at the start of one.
+    """
     from sqlalchemy import text as _text
+    from sqlalchemy.ext.asyncio import AsyncSession
 
-    from app.core.db import async_session_factory
+    from app.core.db import engine
 
-    async with async_session_factory() as session:
+    async with engine.connect() as connection:
+        session = AsyncSession(bind=connection, expire_on_commit=False)
         await session.execute(_text("SELECT set_config('app.current_org_id', '', false)"))
-        yield session
+        try:
+            yield session
+        finally:
+            # Release row locks before _clean_between_tests' TRUNCATE (which
+            # runs on a different engine and needs ACCESS EXCLUSIVE) can be
+            # blocked waiting on this connection.
+            await session.rollback()
+            await session.close()
 
 
 async def set_org_context(session, org_id: uuid.UUID, *, is_local: bool = False) -> None:

@@ -25,7 +25,7 @@ from app.models.ledger import CommitmentState
 # the same commitment.
 AuditAction = Enum(
     "created", "verified", "corrected", "state_transition", "payment_status_updated",
-    "outbound_sent",
+    "outbound_sent", "evidence_added",
     name="audit_action",
 )
 

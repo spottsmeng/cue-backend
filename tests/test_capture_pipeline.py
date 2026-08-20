@@ -31,9 +31,15 @@ class ScriptedModelClient:
         self.rules = rules
         self.default = default or {"commitments": []}
         self.calls = 0
+        # Kept so a test can assert on what the pipeline actually built, not
+        # only on what came back — the already-logged context block is a
+        # property of the prompt, and asserting it here is what distinguishes
+        # "the model was told" from "the model happened to guess right".
+        self.seen_prompts: list[str] = []
 
     async def complete(self, prompt: str, schema: dict):
         self.calls += 1
+        self.seen_prompts.append(prompt)
         for substring, response in self.rules:
             if substring in prompt:
                 return json.dumps(response), FAKE_LLM_USAGE
@@ -263,3 +269,204 @@ async def test_opted_out_party_messages_never_reach_extraction(app_session, org_
     ).scalars().all()
     assert [m.external_id for m in ah_seng_messages] == ["T01"]
     assert summary.opted_out >= 1
+
+
+# --- over/under-splitting fixes (Over- and Under-splitting…pdf) --------------
+
+
+@pytest.mark.asyncio
+async def test_second_message_sees_the_first_ones_commitment_in_context(
+    app_session, org_and_project
+):
+    """The end-to-end shape of the reported "AI invents fake promises out of
+    people just talking": message 1 logs a real commitment, message 2 is a
+    colleague chasing it. Before this, message 2 had no way to know message 1
+    existed and produced a second, fake ledger row. Now the prompt carries the
+    already-logged list and the model can point at it — asserted here on the
+    *prompt* the pipeline actually built, not just on extractor internals.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    project = (
+        await app_session.execute(select(Project).where(Project.id == project_id))
+    ).scalar_one()
+    channel = Channel(project_id=project_id, type="mattermost", external_ref="town-square")
+    app_session.add(channel)
+    await app_session.flush()
+
+    client = ScriptedModelClient(
+        rules=[
+            ("screen install will be delayed", _commitment_response(
+                "screen install will be delayed", "screen install")),
+            # The chaser links instead of creating: relates_to="C1".
+            ("still lands before end of day", {
+                "commitments": [{
+                    "act_type": "query",
+                    "deliverable_en": "screen install",
+                    "deliverable_original": "screen install",
+                    "evidence_span": "still lands before end of day",
+                    "relates_to": "C1",
+                    "confidence": 0.9,
+                }]
+            }),
+        ],
+    )
+
+    async def ingest(external_id, text):
+        raw = RawCapturedMessage(
+            external_id=external_id, sender_external_id="Mei Tan",
+            sent_at=datetime(2026, 6, 22, tzinfo=dt_timezone.utc), text=text,
+            raw_payload_hash=compute_payload_hash("mattermost", external_id, text.encode()),
+        )
+        return await ingest_raw_message(
+            app_session, project=project, channel=channel, adapter=FixtureAdapter(),
+            raw=raw, client=client,
+        )
+
+    _m1, _new1, created1, _ = await ingest("M1", "screen install will be delayed 2 hrs")
+    await app_session.commit()
+    assert created1 == 1
+
+    _m2, _new2, created2, _ = await ingest(
+        "M2", "Can we get written confirmation the 4pm start still lands before end of day?"
+    )
+    await app_session.commit()
+
+    # The whole point: the second message created no new commitment.
+    assert created2 == 0
+    commitments = (
+        await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
+    ).scalars().all()
+    assert len(commitments) == 1
+
+    # ...and it did so because it was *told*, not because it guessed: the
+    # second prompt carried the first commitment as C1.
+    second_prompt = client.seen_prompts[-1]
+    assert "ALREADY LOGGED" in second_prompt
+    # The vendor is "Unresolved Vendor": this is a team_collaboration
+    # channel, the sender is internal staff, and the model named no
+    # counterparty — so app/ledger/extractor.py's own internal-channel path
+    # parked it for human review rather than attaching it to Mei Tan. What
+    # matters here is that the commitment is *in the list* under a stable ref.
+    assert "C1 — Unresolved Vendor: screen install" in second_prompt
+
+    # The chase is still recorded, as evidence on the commitment it was about.
+    evidence = (
+        await app_session.execute(
+            select(Evidence).where(Evidence.commitment_id == commitments[0].id)
+        )
+    ).scalars().all()
+    assert len(evidence) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_extraction_never_loses_the_captured_message(
+    app_session, org_and_project
+):
+    """NFR-AVL-02: capture must never lose a message. Extraction runs inside a
+    SAVEPOINT so a failure under it rolls back the extraction only — the
+    Message row was inserted in this same transaction and must survive."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    project = (
+        await app_session.execute(select(Project).where(Project.id == project_id))
+    ).scalar_one()
+    channel = Channel(project_id=project_id, type="mattermost", external_ref="town-square")
+    app_session.add(channel)
+    await app_session.flush()
+
+    raw = RawCapturedMessage(
+        external_id="BAD", sender_external_id="Mei Tan",
+        sent_at=datetime(2026, 6, 22, tzinfo=dt_timezone.utc),
+        text="screen install is on, and the truss is late",
+        raw_payload_hash=compute_payload_hash("mattermost", "BAD", b"bad"),
+    )
+    client = ScriptedModelClient(
+        rules=[("screen install is on", {"commitments": [
+            {"act_type": "commit", "deliverable_en": "screen install",
+             "deliverable_original": "screen install",
+             "evidence_span": "screen install is on", "confidence": 0.9},
+            {"act_type": "commit", "deliverable_en": "truss",
+             "deliverable_original": "truss",
+             "evidence_span": "a span that is not in this message", "confidence": 0.9},
+        ]})],
+    )
+
+    message, is_new, created, _ = await ingest_raw_message(
+        app_session, project=project, channel=channel, adapter=FixtureAdapter(),
+        raw=raw, client=client,
+    )
+    await app_session.commit()
+
+    assert is_new and created == 0
+    # The message survived...
+    assert (
+        await app_session.execute(select(Message).where(Message.id == message.id))
+    ).scalar_one_or_none() is not None
+    # ...and the valid-looking first half of a rejected extraction did not
+    # sneak onto the ledger with it.
+    assert (
+        await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
+    ).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_linking_a_later_message_does_not_repoint_the_earlier_evidence(
+    app_session, org_and_project
+):
+    """Evidence.message_id is backfilled per *evidence row*, not per
+    commitment. When a second message cites an already-logged commitment, the
+    commitment ends up with two evidence rows from two different messages —
+    selecting by commitment_id (as this used to) would drag the first one's
+    citation onto the second message, so the "show me where this came from"
+    link would point at the wrong conversation.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    project = (
+        await app_session.execute(select(Project).where(Project.id == project_id))
+    ).scalar_one()
+    channel = Channel(project_id=project_id, type="mattermost", external_ref="town-square")
+    app_session.add(channel)
+    await app_session.flush()
+
+    client = ScriptedModelClient(
+        rules=[
+            ("screen install will be delayed", _commitment_response(
+                "screen install will be delayed", "screen install")),
+            ("still lands before end of day", {"commitments": [{
+                "act_type": "query", "deliverable_en": "screen install",
+                "deliverable_original": "screen install",
+                "evidence_span": "still lands before end of day",
+                "relates_to": "C1", "confidence": 0.9,
+            }]}),
+        ],
+    )
+
+    async def ingest(external_id, text):
+        raw = RawCapturedMessage(
+            external_id=external_id, sender_external_id="Mei Tan",
+            sent_at=datetime(2026, 6, 22, tzinfo=dt_timezone.utc), text=text,
+            raw_payload_hash=compute_payload_hash("mattermost", external_id, text.encode()),
+        )
+        return await ingest_raw_message(
+            app_session, project=project, channel=channel, adapter=FixtureAdapter(),
+            raw=raw, client=client,
+        )
+
+    m1, _, _, _ = await ingest("E1", "screen install will be delayed 2 hrs")
+    await app_session.commit()
+    m2, _, _, _ = await ingest(
+        "E2", "Can we get written confirmation the 4pm start still lands before end of day?"
+    )
+    await app_session.commit()
+
+    commitment = (
+        await app_session.execute(select(Commitment).where(Commitment.project_id == project_id))
+    ).scalar_one()
+    evidence = (
+        await app_session.execute(
+            select(Evidence).where(Evidence.commitment_id == commitment.id)
+        )
+    ).scalars().all()
+    assert {e.message_id for e in evidence} == {m1.id, m2.id}

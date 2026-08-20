@@ -1,12 +1,10 @@
-"""Bridges a real captured Message into app/ledger/extractor.py's existing
+"""Bridges a real captured Message into app/ledger/extractor.py's
 extract_case — CLAUDE.md: "real capture doesn't change the extraction
 contract at all (same schema, same prompt), it only changes what feeds it."
 This module is exactly that feed: it builds the same ProjectContext/
 FixtureCase TypedDict shapes cue-eval's fixtures already produce
 (app/capture/fixtures.py), from a real Project/Message/Party, so extract_case
-itself needs no real-capture-aware branch and stays completely untouched —
-CLAUDE.md and Prompt 11b both name app/ledger/extractor.py's core contract as
-off-limits to this session.
+itself needs no real-capture-aware branch.
 
 extract_case's own `case["party"]` resolves a Commitment's vendor Party via
 `_get_or_create_party`'s exact-string display-name match — a real-capture
@@ -26,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.capture.fixtures import FixtureCase, ProjectContext
 from app.capture.models import Message
-from app.models import Milestone, Project
+from app.models import Commitment, Milestone, Party, Project
 
 
 async def build_project_context(session: AsyncSession, project: Project) -> ProjectContext:
@@ -47,6 +45,28 @@ async def build_project_context(session: AsyncSession, project: Project) -> Proj
         )
     ).scalars().all()
 
+    # The project's already-known vendors, by the same definition
+    # app/ask/brief.py and app/reports/composer.py already use for "this
+    # project's vendors" (a vendor_org Party with at least one commitment
+    # here) — Party itself is organisation-scoped, so there is no direct
+    # project->vendor column to read instead.
+    #
+    # This was `[]` until now, which quietly disabled
+    # app/ledger/extractor.py's `_match_known_vendor`: on a real
+    # team_collaboration message every model-named vendor failed to match
+    # anything, so even a correctly-extracted, already-known vendor came back
+    # unconfident and went to human review. Only cue-eval's fixture context
+    # ever had this populated, so the eval measured a path production could
+    # not reach.
+    vendor_names = (
+        await session.execute(
+            select(Party.display_name)
+            .join(Commitment, Commitment.party_id == Party.id)
+            .where(Commitment.project_id == project.id, Party.type == "vendor_org")
+            .distinct()
+        )
+    ).scalars().all()
+
     return ProjectContext(
         project=project.name,
         client=project.client_name or "",
@@ -63,7 +83,7 @@ async def build_project_context(session: AsyncSession, project: Project) -> Proj
             {"name": m.name, "due": m.planned_at.isoformat() if m.planned_at else ""}
             for m in milestones
         ],
-        vendors=[],
+        vendors=[{"party": name} for name in vendor_names],
     )
 
 

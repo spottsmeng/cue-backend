@@ -13,13 +13,14 @@ import json
 
 import pytest
 
+from app.ledger.context import load_open_commitment_context
 from app.ledger.extractor import (
     RejectedExtraction,
     _get_commitment_act_term,
     _get_or_create_party,
     extract_case,
 )
-from app.models import Commitment, Evidence, Party
+from app.models import AuditLog, Commitment, Evidence, Party
 from sqlalchemy import select
 from tests.conftest import FAKE_LLM_USAGE, set_org_context
 
@@ -121,7 +122,7 @@ async def test_valid_extraction_writes_commitment_and_evidence(
         }
     )
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session,
         project_id=project_id,
         organisation_id=org_id,
@@ -130,7 +131,7 @@ async def test_valid_extraction_writes_commitment_and_evidence(
         client=fake,
     )
     await app_session.commit()
-    assert len(created) == 1
+    assert len(outcome.created) == 1
 
     # A genuinely separate session/connection (owner_session), not the same
     # app_session re-queried after expire_all() — proves what Postgres
@@ -138,7 +139,7 @@ async def test_valid_extraction_writes_commitment_and_evidence(
     # map, and does it without app_session's commit -> expire_all -> execute
     # sequence, which triggers a MissingGreenlet under this test setup.
     commitment = (
-        await owner_session.execute(select(Commitment).where(Commitment.id == created[0].id))
+        await owner_session.execute(select(Commitment).where(Commitment.id == outcome.created[0].id))
     ).scalar_one()
     assert commitment.deliverable_en == "screen install"
     assert commitment.confidence == 0.85
@@ -183,7 +184,7 @@ async def test_verification_state_routing(
     }
     fake = FakeModelClient({"commitments": [response]})
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session,
         project_id=project_id,
         organisation_id=org_id,
@@ -193,7 +194,7 @@ async def test_verification_state_routing(
     )
     await app_session.commit()
 
-    assert created[0].verification_state == expected_state
+    assert outcome.created[0].verification_state == expected_state
 
 
 @pytest.mark.asyncio
@@ -272,13 +273,13 @@ async def test_internal_channel_commitment_never_attributed_to_the_sender(
         }
     )
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session, project_id=project_id, organisation_id=org_id,
         context=CONTEXT, case=case, client=fake,
     )
     await app_session.commit()
 
-    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    party = (await app_session.execute(select(Party).where(Party.id == outcome.created[0].party_id))).scalar_one()
     assert party.display_name != "Farah Rahman"
     assert party.display_name == "Golden Sound & Light"
     assert party.type == "vendor_org"
@@ -310,14 +311,14 @@ async def test_internal_channel_matches_known_project_vendor(app_session, org_an
         }
     )
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session, project_id=project_id, organisation_id=org_id,
         context=CONTEXT, case=case, client=fake,
     )
     await app_session.commit()
 
-    assert created[0].verification_state == "auto"
-    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    assert outcome.created[0].verification_state == "auto"
+    party = (await app_session.execute(select(Party).where(Party.id == outcome.created[0].party_id))).scalar_one()
     # Canonical stored name from context["vendors"], not the model's raw casing.
     assert party.display_name == "Ah Seng Production"
 
@@ -346,14 +347,14 @@ async def test_internal_channel_with_no_named_vendor_lands_unresolved_and_pendin
         }
     )
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session, project_id=project_id, organisation_id=org_id,
         context=CONTEXT, case=case, client=fake,
     )
     await app_session.commit()
 
-    assert created[0].verification_state == "pending_verification"
-    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    assert outcome.created[0].verification_state == "pending_verification"
+    party = (await app_session.execute(select(Party).where(Party.id == outcome.created[0].party_id))).scalar_one()
     assert party.display_name == "Unresolved Vendor"
     assert party.type == "vendor_org"
 
@@ -380,12 +381,307 @@ async def test_external_vendor_chat_behaviour_is_unchanged(app_session, org_and_
         }
     )
 
-    created = await extract_case(
+    outcome = await extract_case(
         app_session, project_id=project_id, organisation_id=org_id,
         context=CONTEXT, case=case, client=fake,
     )
     await app_session.commit()
 
-    assert created[0].verification_state == "auto"
-    party = (await app_session.execute(select(Party).where(Party.id == created[0].party_id))).scalar_one()
+    assert outcome.created[0].verification_state == "auto"
+    party = (await app_session.execute(select(Party).where(Party.id == outcome.created[0].party_id))).scalar_one()
     assert party.display_name == "Ah Seng Production"
+
+
+# --- over/under-splitting fixes (Over- and Under-splitting…pdf) --------------
+
+
+def _item(**overrides) -> dict:
+    item = {
+        "act_type": "commit",
+        "deliverable_en": "screen install",
+        "deliverable_original": "screen install",
+        "evidence_span": "screen install",
+        "confidence": 0.95,
+    }
+    item.update(overrides)
+    return item
+
+
+@pytest.mark.asyncio
+async def test_rejection_writes_nothing_even_without_a_rollback(app_session, org_and_project):
+    """extract_case used to write as it looped and raise on the first bad
+    evidence_span, so a message whose *second* item was invalid left the first
+    one persisted. The caller that matters here (app/capture/pipeline.py)
+    cannot simply roll back — the captured Message row is in the same
+    transaction and NFR-AVL-02 says capture must never lose a message — so
+    "the caller rolls back" was never an answer. Deliberately does NOT roll
+    back, which is what makes this a regression test rather than a restatement
+    of the older test above.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = make_case("screen install is on, and the truss is late")
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                _item(),
+                _item(deliverable_en="truss", evidence_span="this span is not in the message"),
+            ]
+        }
+    )
+
+    with pytest.raises(RejectedExtraction):
+        await extract_case(
+            app_session, project_id=project_id, organisation_id=org_id,
+            context=CONTEXT, case=case, client=fake,
+        )
+
+    assert (await app_session.execute(select(Commitment))).scalars().all() == []
+    assert (await app_session.execute(select(Evidence))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_relates_to_attaches_evidence_instead_of_creating_a_commitment(
+    app_session, org_and_project
+):
+    """The fix for the reported "AI invents fake promises out of people just
+    talking": a message about a commitment already on the ledger adds a
+    citation to it, and the ledger does not grow a second row."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+
+    first = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("screen install will start at 4pm"),
+        client=FakeModelClient({"commitments": [_item(evidence_span="screen install")]}),
+    )
+    await app_session.flush()
+    existing = first.created[0]
+
+    ledger_context = await load_open_commitment_context(app_session, project_id=project_id)
+    assert [i.ref for i in ledger_context] == ["C1"]
+
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("can someone confirm the screen install 4pm start still holds?"),
+        client=FakeModelClient(
+            {"commitments": [_item(act_type="query", evidence_span="screen install", relates_to="C1")]}
+        ),
+        ledger_context=ledger_context,
+    )
+    await app_session.commit()
+
+    assert outcome.created == []
+    assert outcome.linked == [existing.id]
+    assert len((await app_session.execute(select(Commitment))).scalars().all()) == 1
+    evidence = (
+        await app_session.execute(select(Evidence).where(Evidence.commitment_id == existing.id))
+    ).scalars().all()
+    assert len(evidence) == 2  # the original citation, plus the message that chased it
+    # A pure chase asserts nothing new, so it must not disturb the commitment.
+    assert existing.verification_state == "auto"
+
+
+@pytest.mark.asyncio
+async def test_linked_message_carrying_a_price_flags_instead_of_dropping_it(
+    app_session, org_and_project
+):
+    """The reported bug's silent inverse. A message that links to an existing
+    commitment AND asserts a new price used to attach an Evidence row and
+    discard the amount entirely — no field, no flag, no queue entry. The
+    commitment is still never auto-edited (that is the whole point of the
+    additive-only design), but the claim has to be *visible*.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+
+    first = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("screen install confirmed"),
+        client=FakeModelClient({"commitments": [_item(evidence_span="screen install")]}),
+    )
+    await app_session.flush()
+    existing = first.created[0]
+    assert existing.amount is None
+    assert existing.verification_state == "auto"
+
+    ledger_context = await load_open_commitment_context(app_session, project_id=project_id)
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("the screen install is now 6200 not 5000"),
+        client=FakeModelClient({"commitments": [_item(
+            act_type="renegotiate", evidence_span="screen install",
+            relates_to="C1", amount=6200, currency="SGD",
+        )]}),
+        ledger_context=ledger_context,
+    )
+    await app_session.commit()
+
+    # Still additive: no new row, and the existing commitment is NOT rewritten.
+    assert outcome.created == []
+    assert outcome.linked == [existing.id]
+    assert len((await app_session.execute(select(Commitment))).scalars().all()) == 1
+    await app_session.refresh(existing)
+    assert existing.amount is None
+
+    # But it is now in front of a human, with the claim on the record.
+    assert existing.verification_state == "pending_verification"
+    audit = (
+        await app_session.execute(
+            select(AuditLog).where(AuditLog.commitment_id == existing.id)
+        )
+    ).scalars().all()
+    linked_event = [a for a in audit if a.action == "evidence_added"][0]
+    assert linked_event.detail["unapplied_claims"]["amount"] == 6200
+    assert linked_event.detail["unapplied_claims"]["currency"] == "SGD"
+    assert linked_event.detail["flagged_reason"] == "unapplied_claims"
+    assert linked_event.detail["prior_verification_state"] == "auto"
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_link_is_flagged_like_a_low_confidence_creation(
+    app_session, org_and_project
+):
+    """`_LOW_CONFIDENCE` guarded only the create path, so an unsure *link* —
+    the model guessing that this message is about an existing commitment —
+    was accepted in silence. The PDF's third requirement is that guessing
+    wrong in either direction is worse than asking."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+
+    first = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("screen install confirmed"),
+        client=FakeModelClient({"commitments": [_item(evidence_span="screen install")]}),
+    )
+    await app_session.flush()
+    existing = first.created[0]
+
+    ledger_context = await load_open_commitment_context(app_session, project_id=project_id)
+    await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("is the screen install still on?"),
+        client=FakeModelClient({"commitments": [_item(
+            act_type="query", evidence_span="screen install", relates_to="C1", confidence=0.4,
+        )]}),
+        ledger_context=ledger_context,
+    )
+    await app_session.commit()
+
+    await app_session.refresh(existing)
+    assert existing.verification_state == "pending_verification"
+
+
+@pytest.mark.asyncio
+async def test_relates_to_naming_an_unoffered_commitment_is_rejected(
+    app_session, org_and_project
+):
+    """The JSON Schema enum should make this undecodable, but a constraint the
+    model was given is not one the database can rely on until code re-checks
+    it — the same reason evidence_span is re-verified rather than trusted."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    with pytest.raises(RejectedExtraction, match="not offered to the model"):
+        await extract_case(
+            app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+            case=make_case("screen install will start at 4pm"),
+            client=FakeModelClient({"commitments": [_item(relates_to="C9")]}),
+            ledger_context=[],
+        )
+
+
+@pytest.mark.asyncio
+async def test_counterparty_echoing_the_sender_never_becomes_a_vendor(
+    app_session, org_and_project
+):
+    """prompt.txt asks the model never to put the sender in counterparty_name.
+    CLAUDE.md's first rule is that asking is not enforcement — without this,
+    a model echoing the sender mints a vendor_org Party named after a Pico
+    staff member, who then appears in the vendor directory and in vendor
+    reliability metrics."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = make_case(
+        "Marcus Lim here — screen install is still unconfirmed",
+        party="Marcus Lim", channel="mattermost", channel_capability="team_collaboration",
+    )
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT, case=case,
+        client=FakeModelClient({"commitments": [_item(counterparty_name="  marcus lim ")]}),
+    )
+    await app_session.commit()
+
+    party = (
+        await app_session.execute(select(Party).where(Party.id == outcome.created[0].party_id))
+    ).scalar_one()
+    assert party.display_name == "Unresolved Vendor"
+    assert outcome.created[0].verification_state == "pending_verification"
+    assert (
+        await app_session.execute(select(Party).where(Party.display_name == "Marcus Lim"))
+    ).scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_overlapping_evidence_spans_route_both_to_human_review(
+    app_session, org_and_project
+):
+    """Two commitments quoting the same stretch of text is the signature of
+    one promise split in two. Not rejected — a message can legitimately
+    interleave two promises — but never accepted silently either."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = make_case("screen install and rehearsal buffer are both tight")
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                _item(evidence_span="screen install and rehearsal buffer"),
+                _item(deliverable_en="rehearsal buffer", evidence_span="rehearsal buffer"),
+            ]
+        }
+    )
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id,
+        context=CONTEXT, case=case, client=fake,
+    )
+    await app_session.commit()
+
+    assert len(outcome.created) == 2
+    assert {c.verification_state for c in outcome.created} == {"pending_verification"}
+
+
+@pytest.mark.asyncio
+async def test_disjoint_evidence_spans_are_not_flagged(app_session, org_and_project):
+    """The counterpart to the test above — a genuine multi-commitment message
+    must not be dragged into human review just for having two commitments."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    case = make_case("screen install is on. Separately, truss supply is confirmed.")
+    fake = FakeModelClient(
+        {
+            "commitments": [
+                _item(evidence_span="screen install is on"),
+                _item(deliverable_en="truss supply", evidence_span="truss supply is confirmed"),
+            ]
+        }
+    )
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id,
+        context=CONTEXT, case=case, client=fake,
+    )
+    await app_session.commit()
+    assert {c.verification_state for c in outcome.created} == {"auto"}
+
+
+@pytest.mark.asyncio
+async def test_low_self_reported_confidence_routes_to_human_review(
+    app_session, org_and_project
+):
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("screen install maybe"),
+        client=FakeModelClient({"commitments": [_item(confidence=0.4)]}),
+    )
+    await app_session.commit()
+    assert outcome.created[0].verification_state == "pending_verification"

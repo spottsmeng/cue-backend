@@ -61,13 +61,31 @@ logger = logging.getLogger("cue.observability.drift")
 
 CUE_EVAL_DIR = Path(__file__).resolve().parents[2] / "cue-eval"
 
-# CLAUDE.md's own recorded baseline (qwen2.5:14b via Ollama, 6 Aug 2026).
-# CLAUDE.md's "never cite a local-model accuracy figure outside this repo"
-# governs *external* use of this number — comparing against it internally,
-# to detect a regression against this repo's own recorded state, is exactly
-# what that baseline is for.
-EXTRACTION_ACCURACY_BASELINE_PCT = 83.3
+# CLAUDE.md's own recorded baseline (qwen2.5:14b via Ollama, 20 Aug 2026,
+# --runs 5 over the full 20-case suite). CLAUDE.md's "never cite a
+# local-model accuracy figure outside this repo" governs *external* use of
+# this number — comparing against it internally, to detect a regression
+# against this repo's own recorded state, is exactly what that baseline is
+# for.
+#
+# Was 83.3 (6 Aug, ten cases). Re-measured rather than carried forward: the
+# suite has since gained the singlish, internal-channel-vendor,
+# consequence-discussion and merged-vendor bands, so the old figure was no
+# longer a number this suite could produce — leaving it in place meant the
+# gate was calibrated against a corpus that no longer exists.
+EXTRACTION_ACCURACY_BASELINE_PCT = 81.9
 EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT = 10.0  # points below baseline before alerting
+
+# F1 over the returned commitment *set*, the second half of what cue-eval now
+# reports (run_eval.py's score()). Gating on field accuracy alone was a real
+# blind spot rather than a conservative choice: that number's denominator is
+# the labelled fields, so a returned commitment matching nothing at all adds
+# nothing to it — a model that invents an extra commitment on every message
+# scores an unchanged field accuracy and would never have tripped this check.
+# Inventing commitments is the failure mode that most directly destroys trust
+# in the ledger, so it gets its own gate.
+EXTRACTION_F1_BASELINE = 0.93  # measured, qwen2.5:14b, 20 Aug 2026, --runs 5
+EXTRACTION_F1_REGRESSION_THRESHOLD = 0.10  # absolute F1 below baseline before alerting
 
 # PRD §8.1 targets.
 ASR_WER_TARGET = 0.08
@@ -178,23 +196,56 @@ async def run_extraction_drift_check(ctx: dict | None = None) -> dict:
             return {"ran": False}
 
         accuracy = summary["overall_field_accuracy"]
-        regressed = accuracy < (EXTRACTION_ACCURACY_BASELINE_PCT - EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT)
-        result = {"ran": True, "provider": provider, "model": model, "accuracy": accuracy, "regressed": regressed}
+        # Older cue-eval revisions did not report f1; treat its absence as
+        # "this signal is unavailable", never as a score of zero, which would
+        # alert every project on a harness/app version skew.
+        f1 = summary.get("f1")
+        accuracy_regressed = accuracy < (
+            EXTRACTION_ACCURACY_BASELINE_PCT - EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT
+        )
+        f1_regressed = (
+            f1 is not None
+            and EXTRACTION_F1_BASELINE > 0
+            and f1 < (EXTRACTION_F1_BASELINE - EXTRACTION_F1_REGRESSION_THRESHOLD)
+        )
+        regressed = accuracy_regressed or f1_regressed
+        result = {
+            "ran": True, "provider": provider, "model": model, "accuracy": accuracy,
+            "f1": f1, "precision": summary.get("precision"), "recall": summary.get("recall"),
+            "spurious": summary.get("spurious"),
+            "regressed": regressed,
+            "accuracy_regressed": accuracy_regressed, "f1_regressed": f1_regressed,
+        }
 
         if regressed:
+            if f1_regressed and not accuracy_regressed:
+                measured = (
+                    f"Extraction F1 for {provider}/{model} measured {f1:.3f} against cue-eval's "
+                    f"labelled corpus, down from a {EXTRACTION_F1_BASELINE:.3f} baseline, while "
+                    f"field accuracy held at {accuracy:.1f}% — the signature of the model "
+                    "returning commitments nobody made rather than filling existing ones in wrongly"
+                )
+            else:
+                measured = (
+                    f"Extraction accuracy for {provider}/{model} measured {accuracy:.1f}% against "
+                    f"cue-eval's labelled corpus, down from an "
+                    f"{EXTRACTION_ACCURACY_BASELINE_PCT:.1f}% baseline"
+                )
             result["projects_notified"] = await _notify_all_projects(
                 source="model_drift",
                 finding_key=f"model_drift:extraction:{provider}:{model}",
                 severity="high",
                 downstream_consequence=(
-                    f"Extraction accuracy for {provider}/{model} measured {accuracy:.1f}% against "
-                    f"cue-eval's labelled corpus, down from an {EXTRACTION_ACCURACY_BASELINE_PCT:.1f}% "
-                    "baseline — commitments extracted from vendor messages during this period may be "
-                    "less reliable (wrong dates, amounts, or missed commitments) until this is investigated."
+                    f"{measured} — commitments extracted from vendor messages during this period "
+                    "may be less reliable (wrong dates, amounts, missed commitments, or commitments "
+                    "that were never made) until this is investigated."
                 ),
                 detail={
                     "provider": provider, "model": model, "accuracy": accuracy,
                     "baseline": EXTRACTION_ACCURACY_BASELINE_PCT,
+                    "f1": f1, "f1_baseline": EXTRACTION_F1_BASELINE,
+                    "precision": summary.get("precision"), "recall": summary.get("recall"),
+                    "spurious": summary.get("spurious"), "missed": summary.get("missed"),
                     "by_band": summary.get("by_band"), "n_cases": summary.get("n_cases"),
                 },
             )

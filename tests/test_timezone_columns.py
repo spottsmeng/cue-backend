@@ -7,18 +7,23 @@ this proves the actual round-trip behaviour, not just the column type.
 """
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
 
-from app.ledger.extractor import _get_commitment_act_term, _parse_timestamp
+from app.ledger.extractor import _get_commitment_act_term, _parse_timestamp, _project_tzinfo
 from app.models import Commitment, Evidence
 from tests.conftest import set_org_context
 
 
+_SG = ZoneInfo("Asia/Singapore")
+
+
 def test_parse_timestamp_preserves_offset():
-    """The exact value shape cue-eval/cases.json T01 produces."""
-    dt = _parse_timestamp("2026-06-22T16:00:00+08:00")
+    """The exact value shape cue-eval/cases.json T01 produces. An explicit
+    offset in the value always wins over the project's zone."""
+    dt = _parse_timestamp("2026-06-22T16:00:00+08:00", _SG)
     assert dt.utcoffset() == timedelta(hours=8)
     assert dt.astimezone(timezone.utc) == datetime(2026, 6, 22, 8, 0, tzinfo=timezone.utc)
 
@@ -26,8 +31,28 @@ def test_parse_timestamp_preserves_offset():
 def test_parse_timestamp_date_only_gets_a_zone():
     """T08's due_at ("2026-06-19") has no time component at all — must not
     come out naive, since due_at is timestamptz."""
-    dt = _parse_timestamp("2026-06-19")
+    dt = _parse_timestamp("2026-06-19", _SG)
     assert dt.tzinfo is not None
+
+
+def test_naive_timestamp_uses_the_projects_own_zone_not_a_fixed_plus_8():
+    """The tenant-coupling half of the same bug: a naive value used to be read
+    as +08:00 for every organisation, so a London tenant's due dates landed
+    eight hours early — in a product whose whole value is due dates."""
+    sg = _parse_timestamp("2026-06-22T16:00:00", _SG)
+    london = _parse_timestamp("2026-06-22T16:00:00", ZoneInfo("Europe/London"))
+
+    assert sg.utcoffset() == timedelta(hours=8)
+    assert london.utcoffset() == timedelta(hours=1)  # BST in June
+    assert london.astimezone(timezone.utc) - sg.astimezone(timezone.utc) == timedelta(hours=7)
+
+
+def test_project_tzinfo_falls_back_rather_than_raising_on_a_bad_zone():
+    """An unset or malformed Project.timezone must not take extraction down —
+    NFR-AVL-02 says capture never loses a message."""
+    assert _project_tzinfo({"timezone": "Asia/Singapore"}) == _SG
+    assert _project_tzinfo({"timezone": "Not/AZone"}).utcoffset(None) == timedelta(hours=8)
+    assert _project_tzinfo({}).utcoffset(None) == timedelta(hours=8)
 
 
 @pytest.mark.asyncio

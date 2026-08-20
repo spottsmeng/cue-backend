@@ -2,7 +2,7 @@ name: cue-eval (Ollama)
 
 # Informational only, deliberately not part of the required pytest gate:
 # cue-eval/README.md calls this suite "a smoke test and a regression gate,
-# not an accuracy measurement" — ten synthetic cases, scored against
+# not an accuracy measurement" — synthetic cases, scored against
 # zero-cost local qwen2.5:14b per project policy (Anthropic spend is
 # deferred until go-live). run_eval.py never exits non-zero on a low score,
 # only if Ollama itself is unreachable, so there is nothing here to "fail"
@@ -20,7 +20,7 @@ on:
         description: "Repeat count per case (CLAUDE.md: --runs 5 before trusting a result)"
         default: "1"
       band:
-        description: "Optional: only this band (easy | code-switched | multi | ambiguous-date)"
+        description: "Optional: only this band (easy | code-switched | multi | ambiguous-date | singlish | internal-channel-vendor | consequence-discussion | merged-vendor)"
         default: ""
   pull_request:
     paths:

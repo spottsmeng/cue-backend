@@ -299,6 +299,56 @@
         ]
       },
       "note": "Internal Mattermost channel naming a vendor already in project_context.vendors (Vertex Fabrication) — the match-against-known-vendors path, distinct from IC01's unmatched-vendor path. Sender (Marcus Lim, Producer) is internal staff relaying what the vendor said, not the vendor."
+    },
+    {
+      "id": "CD01",
+      "band": "consequence-discussion",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Jason Teo",
+      "sent_at": "2026-06-22T09:45:00+08:00",
+      "message": "Twin's flagging this as touching the critical path — rehearsal is booked right after install, so a 2hr slip here eats directly into that buffer. No slack left if anything else moves.",
+      "expect": {
+        "count": 0,
+        "commitments": []
+      },
+      "note": "extraction-tuning-task.md failure mode 1, verbatim. Internal staff discussing the *consequence* of an already-captured AV-delay commitment (Ah Seng's 2hr slip, see T01) — no offer/commit/confirm/quote/approve/revoke/renegotiate/query is made here, so per CLAUDE.md's 'one commitment per distinct promise' this message should extract zero commitments. Both qwen2.5:14b and claude-haiku-4-5 previously over-split this into a standalone 'rehearsal buffer' commitment. Deliberately given NO ledger_context, unlike CD02: this message makes no request at all, so it is the case that proves the model does not invent a commitment out of pure discussion even with nothing to point at."
+    },
+    {
+      "id": "CD02",
+      "band": "consequence-discussion",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Mei Tan",
+      "sent_at": "2026-06-22T09:52:00+08:00",
+      "message": "Noted. As long as it's contained to today's install window we're fine — client walkthrough isn't until next week. Can we get written confirmation the 4pm start still lands before end of day?",
+      "ledger_context": [
+        { "vendor": "Ah Seng Production", "deliverable_en": "screen install", "due_at": "2026-06-22T16:00:00+08:00", "amount": null, "state": "proposed" }
+      ],
+      "expect": {
+        "count": 1,
+        "commitments": [
+          { "act_type": "query", "relates_to": "C1" }
+        ]
+      },
+      "note": "extraction-tuning-task.md failure mode 1, verbatim, WITH the ledger context a real capture would have had. The label was deliberately changed from the context-free count:0 it was first written with. Without context this message is indistinguishable from S03 — both are the sender asking the recipient to do something, which prompt.txt's own `query` rule says to extract — so count:0 was unsatisfiable from the message text alone, and could only ever have been met by a rule that also broke S03 (CLAUDE.md: 'check the label before changing the prompt'). The fact that makes it not-new lives in an earlier message, so it is supplied the way production supplies it: as an already-logged commitment the model can point at. Correct behaviour is one item linked to C1, which app/ledger/extractor.py persists as an Evidence row on the existing commitment — creating no new ledger row, so the business outcome (no invented checklist item) is the one this case was written to protect, while the chase itself is still recorded."
+    },
+    {
+      "id": "CD03",
+      "band": "merged-vendor",
+      "lang": "en",
+      "channel": "mattermost",
+      "party": "Mei Tan",
+      "sent_at": "2026-06-19T14:30:00+08:00",
+      "message": "Good. One more — Ah Seng's LED screen install and Vertex's aluminum frame delivery + test print are still sitting as proposed, no confirmed dates yet. Don't want those turning into last-minute like the Golden Sound & Light delay.",
+      "expect": {
+        "count": 2,
+        "commitments": [
+          { "deliverable_contains": "screen", "counterparty_contains": "ah seng" },
+          { "deliverable_contains": "frame", "counterparty_contains": "vertex" }
+        ]
+      },
+      "note": "extraction-tuning-task.md failure mode 2, verbatim — the under-splitting half of the reported bug, which the suite had no case for at all. claude-haiku-4-5 merged this into ONE commitment ('LED screen install and aluminum frame delivery with test print confirmation'), welding two different vendors' two different deliverables into a single record. Deliberately given NO ledger_context: this case measures whether the model splits by counterparty when everything it needs is already in the message (the PDF's own 'does the AI have enough information? Yes'), so mixing in the relates_to path would stop it isolating that. act_type is deliberately not labelled — internal staff flagging two stalled items is a genuine escalate/query borderline, and pinning it would make this case fail for a reason unrelated to the splitting behaviour it exists to measure."
     }
   ]
 }
