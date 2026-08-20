@@ -40,7 +40,7 @@ RULES
   of the message and must not contain times, dates or prices. Those belong in due_at and amount.
 - due_at must be populated whenever any time or date can be determined or inferred from the
   message. Never leave it null if the message states or implies when something happens.
-- Resolve every time to ISO 8601 with the +08:00 offset. Use the Sent timestamp and the project
+- Resolve every time to ISO 8601 with the {utc_offset} offset. Use the Sent timestamp and the project
   context to infer the date. Relative expressions (tomorrow, 明天, 后天, next Tuesday) are relative
   to the Sent timestamp. If only a date is determinable, output the date alone (YYYY-MM-DD).
 - Emit ONE commitment per distinct promise. Do not emit a second commitment that restates the

@@ -312,3 +312,73 @@ async def test_open_alert_count_reflects_only_open_state(app_session, authed_org
 
     assert response.status_code == 200
     assert response.json() == {"count": 1}
+
+
+@pytest.mark.asyncio
+async def test_accounts_proxy_does_not_leak_another_tenants_layer_a_accounts(
+    app_session, authed_org_and_project, monkeypatch
+):
+    """A cross-tenant data leak behind an authenticated role.
+
+    The Layer A gateway is one shared process with no tenant concept, so
+    `client.list_accounts()` returns every account it runs for everybody. The
+    proxy endpoint took no org_id at all and returned that list verbatim, so
+    any organisation administrator could read every other tenant's account
+    names, channel types and health.
+
+    Scoping is derived from LayerAHealthSnapshot, the only org-to-account
+    mapping that exists, and fails closed: an account this org has never
+    polled is invisible rather than leaked.
+    """
+    from app.api import layer_a_admin
+
+    org_id, project_id, _admin, admin_token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+
+    ours, theirs = "acct-ours", "acct-theirs"
+    app_session.add(
+        LayerAHealthSnapshot(
+            organisation_id=org_id, account_id=ours, source="poll",
+            recorded_at=NOW, healthy=True, status="connected",
+        )
+    )
+    await app_session.commit()
+
+    # The gateway answers with both tenants' accounts, as a shared process does.
+    async def fake_list_accounts():
+        return [
+            {"accountId": ours, "channelType": "whatsapp", "mode": None,
+             "displayName": "Ours", "riskTier": None, "healthy": True,
+             "status": "connected", "lastError": None, "detail": None},
+            {"accountId": theirs, "channelType": "whatsapp", "mode": None,
+             "displayName": "A Competitor Pte Ltd", "riskTier": None, "healthy": True,
+             "status": "connected", "lastError": None, "detail": None},
+        ]
+
+    async def fake_get_account(account_id):
+        return next((a for a in await fake_list_accounts() if a["accountId"] == account_id), None)
+
+    class _FakeClient:
+        list_accounts = staticmethod(fake_list_accounts)
+        get_account = staticmethod(fake_get_account)
+
+    monkeypatch.setattr(layer_a_admin, "_client", lambda: _FakeClient())
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        listed = await client.get("/admin/layer-a/accounts", headers=_headers(admin_token))
+        mine = await client.get(
+            f"/admin/layer-a/accounts/{ours}", headers=_headers(admin_token)
+        )
+        not_mine = await client.get(
+            f"/admin/layer-a/accounts/{theirs}", headers=_headers(admin_token)
+        )
+
+    assert listed.status_code == 200
+    assert [a["accountId"] for a in listed.json()] == [ours]
+    assert "A Competitor Pte Ltd" not in listed.text
+
+    assert mine.status_code == 200
+    # 404, not 403 — another tenant's account is indistinguishable from one
+    # that does not exist, so the endpoint is not an existence oracle either.
+    assert not_mine.status_code == 404

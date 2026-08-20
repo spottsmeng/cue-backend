@@ -115,3 +115,49 @@ async def test_file_storage_capability_adapter_has_no_send_concept():
     channel = Channel(type="nextcloud", external_ref="/CUE")
     with pytest.raises(NotImplementedError):
         await adapter.send(channel, "irrelevant", "irrelevant")
+
+
+@pytest.mark.asyncio
+async def test_consent_notice_names_the_tenant_not_a_hardcoded_pico(
+    app_session, org_and_project
+):
+    """This text is sent to real outside parties and states on whose behalf
+    their messages are being recorded. "Pico" was a literal in it.
+
+    On any other tenant that is not a cosmetic naming slip — it is a legal
+    notice naming the wrong data controller, which is worse than no notice,
+    because a vendor who replied ACCEPT would have consented to something
+    untrue. Both language halves have to carry the right name, not just the
+    English one.
+    """
+    from sqlalchemy import select
+
+    from app.capture.consent import build_consent_notice
+    from app.models import Organisation
+
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    org = (
+        await app_session.execute(select(Organisation).where(Organisation.id == org_id))
+    ).scalar_one()
+
+    notice = await build_consent_notice(app_session, project_id=project_id)
+
+    assert "Pico" not in notice
+    assert notice.count(org.name) == 2  # the English half and the 中文 half
+    assert "{organisation}" not in notice
+    assert "ACCEPT" in notice and "OPT-OUT" in notice
+
+
+@pytest.mark.asyncio
+async def test_consent_notice_falls_back_rather_than_failing_to_send(app_session):
+    """A notice that goes out slightly generic is recoverable. One that fails
+    to go out is an FR-CAP-06 breach and blocks capture for that party, so an
+    unresolvable organisation must not raise."""
+    import uuid as _uuid
+
+    from app.capture.consent import build_consent_notice
+
+    notice = await build_consent_notice(app_session, project_id=_uuid.uuid4())
+    assert "the project operator" in notice
+    assert "{organisation}" not in notice

@@ -398,3 +398,73 @@ def test_eval_harness_builds_the_same_relates_to_shape_as_production():
         return schema
 
     assert dig(harness) == dig(production)
+
+
+# --- the prompt's UTC offset is the project's, not Singapore's -------------
+
+
+def test_rendered_prompt_is_byte_identical_to_the_old_hardcoded_singapore_one():
+    """The prompt used to instruct "Resolve every time to ISO 8601 with the
+    +08:00 offset" as a literal, four lines under an interpolated
+    `Timezone: {timezone}` it ignored. Correct for Pico, silently eight hours
+    wrong for anyone else.
+
+    Interpolating the project's real offset is only safe to ship without a
+    fresh --runs 5 if it provably changes nothing for the existing corpus —
+    every cue-eval case is Asia/Singapore, which renders "+08:00", so the
+    rendered prompt must come out byte-for-byte identical. That is what this
+    asserts: not "the offset is right" but "no existing measurement moved".
+    """
+    from app.ledger.extractor import build_prompt
+
+    context = {
+        "project": "P", "client": "C", "timezone": "Asia/Singapore", "venue": "V",
+        "build_up": ["2026-06-22"], "event_days": ["2026-06-24"],
+        "doors": "2026-06-24T09:00:00+08:00",
+        "known_milestones": [{"name": "M", "due": "2026-06-20"}], "vendors": [],
+    }
+    case = {
+        "id": "TX", "band": "test", "lang": "en", "channel": "whatsapp",
+        "party": "V", "sent_at": "2026-06-22T09:00:00+08:00",
+        "message": "screen install tomorrow", "sent_weekday": None,
+    }
+
+    rendered = build_prompt(context, case)
+    assert "with the +08:00 offset" in rendered
+    # And the literal template placeholder is gone — a missed substitution
+    # would leave the model reading "{utc_offset}" as instruction text.
+    assert "{utc_offset}" not in rendered
+
+
+def test_a_non_singapore_project_gets_its_own_offset_with_dst_resolved():
+    """The bug this fixes, and the reason the offset is computed rather than
+    asked for: a fixed string cannot express that London is +01:00 in June and
+    +00:00 in December. The message's own sent time decides which."""
+    from app.ledger.extractor import _utc_offset_label
+
+    london = {"timezone": "Europe/London"}
+    assert _utc_offset_label(london, {"sent_at": "2026-06-20T12:00:00+00:00"}) == "+01:00"
+    assert _utc_offset_label(london, {"sent_at": "2026-12-20T12:00:00+00:00"}) == "+00:00"
+    assert _utc_offset_label({"timezone": "America/New_York"},
+                             {"sent_at": "2026-06-20T12:00:00+00:00"}) == "-04:00"
+    # An unusable zone falls back rather than taking extraction down.
+    assert _utc_offset_label({"timezone": "Not/AZone"},
+                             {"sent_at": "2026-06-20T12:00:00+00:00"}) == "+08:00"
+
+
+def test_eval_harness_computes_the_same_offset_as_production():
+    """run_eval.py hand-duplicates the offset calculation so it can run with
+    no app imports. Same pinning as render_ledger_context and the relates_to
+    schema: the duplicate is allowed, drifting from production is not."""
+    import sys
+    from pathlib import Path
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "cue-eval"))
+    import run_eval
+
+    from app.ledger.extractor import _utc_offset_label
+
+    for tz in ("Asia/Singapore", "Europe/London", "America/New_York", "Not/AZone"):
+        for sent_at in ("2026-06-20T12:00:00+00:00", "2026-12-20T12:00:00+00:00"):
+            ctx, case = {"timezone": tz}, {"sent_at": sent_at}
+            assert run_eval.utc_offset_label(ctx, case) == _utc_offset_label(ctx, case), (tz, sent_at)

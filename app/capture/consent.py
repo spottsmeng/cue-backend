@@ -18,22 +18,49 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.capture.adapters.registry import get_adapter
-from app.models import Channel, ConsentRecord, Party
+from app.models import Channel, ConsentRecord, Organisation, Party, Project
 
 # FR-CAP-06's own wording: "bilingual". Not project/channel-specific
 # copy — a generic notice naming CUE as the automated capture agent, since
 # the party being notified has no relationship with this text beyond "a
 # system is now logging this conversation for project recordkeeping."
-BILINGUAL_CONSENT_NOTICE = (
+_BILINGUAL_CONSENT_NOTICE_TEMPLATE = (
     "This conversation is being recorded by CUE, an automated project "
-    "recordkeeping system, on behalf of Pico. Messages, media and voice "
-    "notes you send here may be captured, transcribed and stored as part "
-    "of the project record. Reply ACCEPT to continue, OBJECT to raise a "
+    "recordkeeping system, on behalf of {organisation}. Messages, media and "
+    "voice notes you send here may be captured, transcribed and stored as "
+    "part of the project record. Reply ACCEPT to continue, OBJECT to raise a "
     "concern, or OPT-OUT to be excluded from capture.\n"
-    "本对话正由 CUE（Pico 委托的自动化项目记录系统）记录。您在此发送的文字、"
+    "本对话正由 CUE（{organisation} 委托的自动化项目记录系统）记录。您在此发送的文字、"
     "媒体及语音信息可能被采集、转写并存档,作为项目记录的一部分。"
     "回复 ACCEPT 表示同意,OBJECT 表示提出异议,OPT-OUT 表示要求不被记录。"
 )
+
+
+async def build_consent_notice(session: AsyncSession, *, project_id: uuid.UUID) -> str:
+    """The notice text for one tenant.
+
+    Named "Pico" as a literal until now, in text that is *sent to real
+    outside parties* and states on whose behalf their messages are being
+    recorded. On any other tenant that was not a cosmetic naming slip: it is
+    a legal notice naming the wrong data controller, which is worse than no
+    notice at all, since a vendor who consented would have consented to
+    something untrue.
+
+    Falls back to the CUE-operator wording rather than raising if the
+    organisation cannot be resolved — a consent notice that goes out slightly
+    generic is recoverable, one that fails to go out at all is an FR-CAP-06
+    breach and blocks capture for that party.
+    """
+    organisation = (
+        await session.execute(
+            select(Organisation.name)
+            .join(Project, Project.organisation_id == Organisation.id)
+            .where(Project.id == project_id)
+        )
+    ).scalar_one_or_none()
+    return _BILINGUAL_CONSENT_NOTICE_TEMPLATE.format(
+        organisation=organisation or "the project operator"
+    )
 
 
 async def upsert_consent_record(
@@ -91,7 +118,8 @@ async def post_consent_notice(
     one for any other reason.
     """
     adapter = get_adapter(channel.type)
-    await adapter.send(channel, to_external_id, BILINGUAL_CONSENT_NOTICE)
+    notice = await build_consent_notice(session, project_id=channel.project_id)
+    await adapter.send(channel, to_external_id, notice)
     return await upsert_consent_record(
         session,
         party_id=party.id,

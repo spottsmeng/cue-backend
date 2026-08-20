@@ -64,11 +64,13 @@
       "sent_at": "2026-06-21T14:20:00+08:00",
       "message": "Wayfinding signage proof approved and printed. All 12 panels delivered to the venue store this afternoon.",
       "expect": {
-        "count": 1,
+        "count": 2,
         "commitments": [
-          { "act_type": "confirm", "deliverable_contains": "signage" }
+          { "act_type": "confirm", "deliverable_contains": "signage" },
+          { "deliverable_contains": "deliver" }
         ]
-      }
+      },
+      "note": "Relabelled from count:1 on 20 Aug 2026. The original label was wrong, and it was costing precision on every run of both models. This message reports two distinct things at two different production stages — a proof approved and printed, and 12 physical panels delivered to the venue store — and a PM chases those separately: one is artwork sign-off, the other is a physical receipt at a location. Per CLAUDE.md's own 'one commitment per distinct promise', that is two. Evidence for the relabel rather than a prompt fix: qwen2.5:14b and claude-haiku-4-5 independently return the same two items with the same clause boundary, 10/10 runs across the two models, with non-overlapping evidence spans and the correct vendor on both. This is not the over-splitting failure mode CD01/T03-style labels exist to catch — that is a qualifying remark ('no change to cost') becoming its own row, and both items here are substantive, separately-chaseable deliverables. Against the old label these two correct extractions were scored as one hit plus one spurious commitment, which was half of haiku's total spurious count across the whole suite. CLAUDE.md: 'When a case fails, check the label before changing the prompt... Bending a prompt to match a bad label is how an eval suite rots.' act_type on the second item is deliberately unlabelled: qwen returns commit and haiku returns confirm for a past-tense report of a completed delivery, a genuine borderline that would fail this case for a reason unrelated to the splitting it now measures — same reasoning as CD03's own note."
     },
     {
       "id": "T04",

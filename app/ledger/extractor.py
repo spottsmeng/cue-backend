@@ -139,6 +139,7 @@ def build_prompt(
         doors=context["doors"],
         milestones=milestones,
         open_commitments=render_ledger_context(ledger_context or []),
+        utc_offset=_utc_offset_label(context, case),
         channel=case["channel"],
         party=case["party"],
         sent_at=case["sent_at"],
@@ -161,6 +162,34 @@ def _project_tzinfo(context: ProjectContext) -> tzinfo:
         return ZoneInfo(context["timezone"])
     except (KeyError, ZoneInfoNotFoundError, ValueError):
         return _SGT
+
+
+def _utc_offset_label(context: ProjectContext, case: FixtureCase) -> str:
+    """The project's UTC offset at the moment this message was sent, as
+    "+08:00" / "-05:00", for interpolation into the extraction prompt.
+
+    The prompt used to hardcode "+08:00" as a literal instruction while
+    `Timezone: {timezone}` sat interpolated four lines above it, ignored —
+    correct for Pico, and silently eight hours wrong for any other tenant, in
+    a product whose entire value is due dates.
+
+    Computed rather than asked for: deriving an offset from an IANA zone name
+    is exactly the kind of work CLAUDE.md's "enforce, don't ask" says to do in
+    code. It also resolves DST correctly, which a fixed offset cannot — a
+    London project is +01:00 in June and +00:00 in December, and the message's
+    own sent time is what decides which.
+    """
+    try:
+        sent_at = datetime.fromisoformat(case["sent_at"])
+    except (KeyError, ValueError):
+        sent_at = datetime.now(dt_timezone.utc)
+    tz = _project_tzinfo(context)
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=tz)
+    offset = sent_at.astimezone(tz).utcoffset() or timedelta(0)
+    total = int(offset.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    return f"{sign}{abs(total) // 3600:02d}:{abs(total) % 3600 // 60:02d}"
 
 
 def _parse_timestamp(value: str, tz: tzinfo) -> datetime:

@@ -17,6 +17,8 @@ CUE extraction eval — stdlib only, no pip install required.
 """
 
 import argparse, itertools, json, os, statistics, sys, time, urllib.error, urllib.request
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -72,6 +74,29 @@ def case_schema(case):
     return schema
 
 
+def utc_offset_label(ctx, case):
+    """The project's UTC offset at the message's sent time, as "+08:00".
+
+    Hand-duplicated from app/ledger/extractor.py's _utc_offset_label for the
+    same reason the rest of this file duplicates production: the harness runs
+    with no app imports. tests/test_ledger_context.py pins the two together.
+    """
+    try:
+        sent_at = datetime.fromisoformat(case["sent_at"])
+    except (KeyError, ValueError):
+        sent_at = datetime.now(timezone.utc)
+    try:
+        tz = ZoneInfo(ctx["timezone"])
+    except (KeyError, ZoneInfoNotFoundError, ValueError):
+        tz = timezone(timedelta(hours=8))
+    if sent_at.tzinfo is None:
+        sent_at = sent_at.replace(tzinfo=tz)
+    offset = sent_at.astimezone(tz).utcoffset() or timedelta(0)
+    total = int(offset.total_seconds())
+    sign = "+" if total >= 0 else "-"
+    return "{}{:02d}:{:02d}".format(sign, abs(total) // 3600, abs(total) % 3600 // 60)
+
+
 def build_prompt(case):
     ctx = CASES["project_context"]
     milestones = "\n".join(
@@ -80,6 +105,7 @@ def build_prompt(case):
     weekday = case.get("sent_weekday")
     return TEMPLATE.format(
         open_commitments=render_ledger_context(case),
+        utc_offset=utc_offset_label(ctx, case),
         project=ctx["project"],
         client=ctx["client"],
         timezone=ctx["timezone"],

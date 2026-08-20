@@ -56,19 +56,64 @@ async def _proxy_layer_a(coro):
         raise HTTPException(status_code=502, detail=f"Layer A unreachable: {e}") from e
 
 
+async def _org_account_ids(session: AsyncSession, org_id: uuid.UUID) -> set[str]:
+    """Layer A account ids this organisation has actually seen.
+
+    The Layer A gateway is a single shared process with no tenant concept —
+    `client.list_accounts()` returns every account it runs, for everybody. The
+    proxy endpoints below had no `org_id` at all, so any organisation
+    administrator could read every other tenant's WhatsApp/WeChat account
+    names, channel types and health. That is a cross-tenant data leak behind
+    an authenticated role, not a cosmetic scoping miss.
+
+    `LayerAHealthSnapshot` is the only org↔account mapping that exists: the
+    poller writes one row per (organisation_id, account_id) it observes. So
+    scoping is derived from what this org has polled, which **fails closed** —
+    an account the org has never polled is invisible rather than leaked. That
+    is the correct direction for this bug, and the residual cost (a
+    just-provisioned account not appearing until the first poll) is a delay,
+    not a loss.
+
+    The real fix is that this whole surface is platform-operator, not
+    tenant-facing — the gateway's PIDs and cross-tenant worker table are
+    infrastructure state no tenant should reach at all. That needs a platform
+    role this codebase does not yet have, so this closes the leak with the
+    scoping that is available today.
+    """
+    return set(
+        (
+            await session.execute(
+                select(LayerAHealthSnapshot.account_id)
+                .where(LayerAHealthSnapshot.organisation_id == org_id)
+                .distinct()
+            )
+        ).scalars().all()
+    )
+
+
 @router.get("/accounts", response_model=list[LayerAAccountOut])
 async def list_layer_a_accounts(
+    org_id: Annotated[uuid.UUID, Depends(get_org_id)],
+    session: Annotated[AsyncSession, Depends(get_session)],
     _admin: Annotated[User, Depends(require_org_administrator)],
 ) -> list[dict]:
     client = _client()
-    return await _proxy_layer_a(client.list_accounts())
+    accounts = await _proxy_layer_a(client.list_accounts())
+    visible = await _org_account_ids(session, org_id)
+    return [a for a in accounts if a.get("accountId") in visible]
 
 
 @router.get("/accounts/{account_id}", response_model=LayerAAccountOut)
 async def get_layer_a_account(
     account_id: str,
+    org_id: Annotated[uuid.UUID, Depends(get_org_id)],
+    session: Annotated[AsyncSession, Depends(get_session)],
     _admin: Annotated[User, Depends(require_org_administrator)],
 ) -> dict:
+    # Checked before the proxy call, so another tenant's account is
+    # indistinguishable from one that does not exist — no existence oracle.
+    if account_id not in await _org_account_ids(session, org_id):
+        raise HTTPException(status_code=404, detail="unknown Layer A account")
     client = _client()
     account = await _proxy_layer_a(client.get_account(account_id))
     if account is None:

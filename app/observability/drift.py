@@ -44,6 +44,7 @@ import logging
 import os
 import sys
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy import select, text
@@ -61,31 +62,53 @@ logger = logging.getLogger("cue.observability.drift")
 
 CUE_EVAL_DIR = Path(__file__).resolve().parents[2] / "cue-eval"
 
-# CLAUDE.md's own recorded baseline (qwen2.5:14b via Ollama, 20 Aug 2026,
-# --runs 5 over the full 20-case suite). CLAUDE.md's "never cite a
-# local-model accuracy figure outside this repo" governs *external* use of
-# this number — comparing against it internally, to detect a regression
-# against this repo's own recorded state, is exactly what that baseline is
-# for.
+# Baselines are keyed by model, because the gate runs whatever
+# get_llm_settings() has configured and a single hardcoded pair silently
+# becomes the wrong yardstick the moment that changes. This was not
+# hypothetical: the constants were qwen's (81.9 / 0.93) while production
+# extraction is claude-haiku-4-5, which measures 90.8 / 0.961 — so the alert
+# floor sat 18.9 points under the real baseline and extraction could have
+# collapsed by 21% relative while the check reported healthy.
 #
-# Was 83.3 (6 Aug, ten cases). Re-measured rather than carried forward: the
-# suite has since gained the singlish, internal-channel-vendor,
-# consequence-discussion and merged-vendor bands, so the old figure was no
-# longer a number this suite could produce — leaving it in place meant the
-# gate was calibrated against a corpus that no longer exists.
-EXTRACTION_ACCURACY_BASELINE_PCT = 81.9
-EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT = 10.0  # points below baseline before alerting
+# CLAUDE.md's "never cite a local-model accuracy figure outside this repo"
+# governs *external* use of these numbers. Comparing against them internally,
+# to detect a regression against this repo's own recorded state, is exactly
+# what a baseline is for.
+@dataclass(frozen=True)
+class ExtractionBaseline:
+    """One model's measured position on the current 20-case suite.
 
-# F1 over the returned commitment *set*, the second half of what cue-eval now
-# reports (run_eval.py's score()). Gating on field accuracy alone was a real
-# blind spot rather than a conservative choice: that number's denominator is
-# the labelled fields, so a returned commitment matching nothing at all adds
-# nothing to it — a model that invents an extra commitment on every message
-# scores an unchanged field accuracy and would never have tripped this check.
-# Inventing commitments is the failure mode that most directly destroys trust
-# in the ledger, so it gets its own gate.
-EXTRACTION_F1_BASELINE = 0.93  # measured, qwen2.5:14b, 20 Aug 2026, --runs 5
+    `accuracy_pct` is cue-eval's field accuracy; `f1` is F1 over the returned
+    commitment *set*. Both are gated, because field accuracy alone was a real
+    blind spot rather than a conservative choice: its denominator is the
+    labelled fields, so a commitment the model invented matches nothing and
+    cannot lower it. A model inventing an extra commitment on every message
+    scores an unchanged field accuracy and would never trip that check —
+    and inventing commitments is the failure mode that most directly destroys
+    trust in the ledger.
+    """
+
+    accuracy_pct: float
+    f1: float
+    measured_on: str
+
+
+EXTRACTION_BASELINES: dict[str, ExtractionBaseline] = {
+    # qwen2.5:14b was 83.3 on 6 Aug over ten cases. Re-measured rather than
+    # carried forward: the suite has since gained the singlish,
+    # internal-channel-vendor, consequence-discussion and merged-vendor bands,
+    # so the old figure was no longer a number this suite could produce.
+    "qwen2.5:14b": ExtractionBaseline(81.9, 0.93, "2026-08-20, --runs 5"),
+    "claude-haiku-4-5": ExtractionBaseline(90.8, 0.961, "2026-08-20, --runs 5"),
+}
+
+EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT = 10.0  # points below baseline before alerting
 EXTRACTION_F1_REGRESSION_THRESHOLD = 0.10  # absolute F1 below baseline before alerting
+
+# CLAUDE.md: "--runs 5" before trusting a result. The gate used to take
+# run_eval.py's default of 1, deciding whether to raise a production risk off
+# a single sample by a standard this repo's own development process rejects.
+EXTRACTION_DRIFT_RUNS = 5
 
 # PRD §8.1 targets.
 ASR_WER_TARGET = 0.08
@@ -181,7 +204,8 @@ async def run_extraction_drift_check(ctx: dict | None = None) -> dict:
         provider, model = settings.extraction_provider, settings.extraction_model
 
         run_args = [
-            str(CUE_EVAL_DIR / "run_eval.py"), "--provider", provider, "--model", model, "--json",
+            str(CUE_EVAL_DIR / "run_eval.py"), "--provider", provider, "--model", model,
+            "--runs", str(EXTRACTION_DRIFT_RUNS), "--json",
         ]
         env = dict(os.environ)
         if provider == "anthropic" and settings.anthropic_api_key:
@@ -200,20 +224,42 @@ async def run_extraction_drift_check(ctx: dict | None = None) -> dict:
         # "this signal is unavailable", never as a score of zero, which would
         # alert every project on a harness/app version skew.
         f1 = summary.get("f1")
+
+        baseline = EXTRACTION_BASELINES.get(model)
+        if baseline is None:
+            # An unmeasured model must not borrow another model's yardstick.
+            # Comparing haiku against qwen's numbers is what left an 18.9-point
+            # dead zone under the real baseline; silently comparing some third
+            # model against either would be the same bug with a new name. No
+            # baseline is a gap in coverage, so it is *reported* as one rather
+            # than passing quietly.
+            logger.warning(
+                "extraction drift check ran %s with no recorded baseline — "
+                "measure it with --runs 5 and add it to EXTRACTION_BASELINES",
+                model,
+            )
+            return {
+                "ran": True, "provider": provider, "model": model, "accuracy": accuracy,
+                "f1": f1, "precision": summary.get("precision"),
+                "recall": summary.get("recall"), "spurious": summary.get("spurious"),
+                "regressed": False, "baseline_missing": True,
+            }
+
         accuracy_regressed = accuracy < (
-            EXTRACTION_ACCURACY_BASELINE_PCT - EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT
+            baseline.accuracy_pct - EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT
         )
         f1_regressed = (
             f1 is not None
-            and EXTRACTION_F1_BASELINE > 0
-            and f1 < (EXTRACTION_F1_BASELINE - EXTRACTION_F1_REGRESSION_THRESHOLD)
+            and baseline.f1 > 0
+            and f1 < (baseline.f1 - EXTRACTION_F1_REGRESSION_THRESHOLD)
         )
         regressed = accuracy_regressed or f1_regressed
         result = {
             "ran": True, "provider": provider, "model": model, "accuracy": accuracy,
             "f1": f1, "precision": summary.get("precision"), "recall": summary.get("recall"),
             "spurious": summary.get("spurious"),
-            "regressed": regressed,
+            "regressed": regressed, "baseline_missing": False,
+            "baseline_accuracy": baseline.accuracy_pct, "baseline_f1": baseline.f1,
             "accuracy_regressed": accuracy_regressed, "f1_regressed": f1_regressed,
         }
 
@@ -221,7 +267,7 @@ async def run_extraction_drift_check(ctx: dict | None = None) -> dict:
             if f1_regressed and not accuracy_regressed:
                 measured = (
                     f"Extraction F1 for {provider}/{model} measured {f1:.3f} against cue-eval's "
-                    f"labelled corpus, down from a {EXTRACTION_F1_BASELINE:.3f} baseline, while "
+                    f"labelled corpus, down from a {baseline.f1:.3f} baseline, while "
                     f"field accuracy held at {accuracy:.1f}% — the signature of the model "
                     "returning commitments nobody made rather than filling existing ones in wrongly"
                 )
@@ -229,7 +275,7 @@ async def run_extraction_drift_check(ctx: dict | None = None) -> dict:
                 measured = (
                     f"Extraction accuracy for {provider}/{model} measured {accuracy:.1f}% against "
                     f"cue-eval's labelled corpus, down from an "
-                    f"{EXTRACTION_ACCURACY_BASELINE_PCT:.1f}% baseline"
+                    f"{baseline.accuracy_pct:.1f}% baseline"
                 )
             result["projects_notified"] = await _notify_all_projects(
                 source="model_drift",
@@ -242,8 +288,8 @@ async def run_extraction_drift_check(ctx: dict | None = None) -> dict:
                 ),
                 detail={
                     "provider": provider, "model": model, "accuracy": accuracy,
-                    "baseline": EXTRACTION_ACCURACY_BASELINE_PCT,
-                    "f1": f1, "f1_baseline": EXTRACTION_F1_BASELINE,
+                    "baseline": baseline.accuracy_pct,
+                    "f1": f1, "f1_baseline": baseline.f1,
                     "precision": summary.get("precision"), "recall": summary.get("recall"),
                     "spurious": summary.get("spurious"), "missed": summary.get("missed"),
                     "by_band": summary.get("by_band"), "n_cases": summary.get("n_cases"),
