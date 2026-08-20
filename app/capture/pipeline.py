@@ -174,7 +174,13 @@ async def extract_from_message(
     capability = await _channel_capability(session, channel.type)
     context = await build_project_context(session, project)
     ledger_context = await load_open_commitment_context(
-        session, project_id=project.id, pinned_commitment_ids=pinned_commitment_ids
+        session,
+        project_id=project.id,
+        pinned_commitment_ids=pinned_commitment_ids,
+        # Lets the lookup rank by what this message is actually about, rather
+        # than handing over the twelve newest and hoping. Guarded above:
+        # message.text is non-empty by this point.
+        message=message.text,
     )
     case = build_case(
         message,

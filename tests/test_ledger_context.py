@@ -198,3 +198,152 @@ def test_eval_harness_renders_ledger_context_identically_to_production():
 
     assert render_ledger_context(items) == run_eval.render_ledger_context(case)
     assert render_ledger_context([]) == run_eval.render_ledger_context({})
+
+
+# --- relevance selection: being old is not the same as being invisible -----
+
+
+@pytest.mark.asyncio
+async def test_aged_out_commitment_is_recalled_when_the_message_names_it(
+    app_session, org_and_project
+):
+    """The CD01/CD02 cliff. Both are internal staff reacting to something
+    already logged; the only difference between "links correctly 5/5" and
+    "invents a commitment 5/5" is whether that commitment was in this list.
+    A recency-only window turns the first into the second the moment a
+    project outgrows twelve live commitments, which is every real event.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    # The one the message is about, oldest of all — well outside a 12-row
+    # recency window.
+    target = await _make_commitment(
+        app_session, org_id, project_id, name="aluminium frame delivery",
+        vendor="Vertex Fabrication", created_at=base,
+    )
+    for i in range(20):
+        await _make_commitment(
+            app_session, org_id, project_id, name=f"unrelated item {i}",
+            vendor="Bloomworks", created_at=base + timedelta(days=i + 1),
+        )
+
+    recency_only = await load_open_commitment_context(app_session, project_id=project_id)
+    assert target.id not in [i.commitment_id for i in recency_only]
+
+    with_message = await load_open_commitment_context(
+        app_session, project_id=project_id,
+        message="any update on Vertex's aluminium frame delivery?",
+    )
+    assert target.id in [i.commitment_id for i in with_message]
+    assert len(with_message) == 12  # window size is unchanged
+
+
+@pytest.mark.asyncio
+async def test_a_message_matching_nothing_leaves_the_recency_window_untouched(
+    app_session, org_and_project
+):
+    """Relevance reserves slots, it does not replace the window. On a message
+    that matches nothing the result has to be byte-identical to the old
+    behaviour, so this can only ever add a row the old window missed."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    for i in range(20):
+        await _make_commitment(
+            app_session, org_id, project_id, name=f"item {i}",
+            vendor="Bloomworks", created_at=base + timedelta(days=i),
+        )
+
+    recency_only = await load_open_commitment_context(app_session, project_id=project_id)
+    unmatched = await load_open_commitment_context(
+        app_session, project_id=project_id, message="thanks, noted, will revert",
+    )
+    assert [i.commitment_id for i in unmatched] == [i.commitment_id for i in recency_only]
+
+
+@pytest.mark.asyncio
+async def test_relevance_recall_works_on_chinese_with_no_whitespace(
+    app_session, org_and_project
+):
+    """Half this corpus is 中文 or code-switched. Whitespace tokenisation alone
+    would score a Chinese deliverable at zero against a Chinese message naming
+    it, so the recall this whole change buys would not exist for those
+    messages — the ones the ambiguous-date and code-switched bands already
+    show as weakest."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    target = await _make_commitment(
+        app_session, org_id, project_id, name="铝框交付",
+        vendor="Vertex Fabrication", created_at=base,
+    )
+    for i in range(20):
+        await _make_commitment(
+            app_session, org_id, project_id, name=f"unrelated {i}",
+            vendor="Bloomworks", created_at=base + timedelta(days=i + 1),
+        )
+
+    items = await load_open_commitment_context(
+        app_session, project_id=project_id, message="铝框交付的时间确认了吗？",
+    )
+    assert target.id in [i.commitment_id for i in items]
+
+
+@pytest.mark.asyncio
+async def test_refs_stay_newest_first_and_stable_across_identical_calls(
+    app_session, org_and_project
+):
+    """The refs are positional, so an unstable window is an unstable meaning
+    for "C2" — and the model is being asked to echo one back."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    for i in range(20):
+        await _make_commitment(
+            app_session, org_id, project_id, name=f"screen install {i}",
+            vendor="Ah Seng Production", created_at=base + timedelta(days=i),
+        )
+
+    first = await load_open_commitment_context(
+        app_session, project_id=project_id, message="screen install update?",
+    )
+    second = await load_open_commitment_context(
+        app_session, project_id=project_id, message="screen install update?",
+    )
+    assert [i.ref for i in first] == [f"C{n}" for n in range(1, 13)]
+    assert [i.commitment_id for i in first] == [i.commitment_id for i in second]
+    # Newest-first is preserved within the selected set.
+    names = [i.deliverable_en for i in first]
+    assert names[0] == "screen install 19"
+
+
+@pytest.mark.asyncio
+async def test_relevance_never_crowds_out_a_pinned_commitment(
+    app_session, org_and_project
+):
+    """The write-back pin is the strongest possible signal — that commitment
+    was matched to this exact message before extraction ran — so it outranks
+    anything the lexical pass has an opinion about."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    base = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+    pinned = await _make_commitment(
+        app_session, org_id, project_id, name="catering final headcount",
+        vendor="Golden Palate", created_at=base,
+    )
+    for i in range(20):
+        await _make_commitment(
+            app_session, org_id, project_id, name=f"screen install {i}",
+            vendor="Ah Seng Production", created_at=base + timedelta(days=i + 1),
+        )
+
+    items = await load_open_commitment_context(
+        app_session, project_id=project_id,
+        pinned_commitment_ids=(pinned.id,),
+        message="screen install screen install screen install",
+    )
+    assert pinned.id in [i.commitment_id for i in items]
