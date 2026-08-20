@@ -98,8 +98,15 @@ EXTRACTION_BASELINES: dict[str, ExtractionBaseline] = {
     # carried forward: the suite has since gained the singlish,
     # internal-channel-vendor, consequence-discussion and merged-vendor bands,
     # so the old figure was no longer a number this suite could produce.
-    "qwen2.5:14b": ExtractionBaseline(81.9, 0.93, "2026-08-20, --runs 5"),
-    "claude-haiku-4-5": ExtractionBaseline(90.8, 0.961, "2026-08-20, --runs 5"),
+    "qwen2.5:14b": ExtractionBaseline(81.9, 0.944, "2026-08-20, --runs 5, post-T03-relabel"),
+    # Measured on 20 Aug *before* T03's label was corrected from count:1 to
+    # count:2. That relabel removed a spurious commitment per run, so haiku's
+    # true F1 on the current corpus is higher than 0.961 and this floor is
+    # slightly loose — conservative in the safe direction, unlike the
+    # cross-model mismatch this table exists to prevent, but still worth
+    # re-measuring before go-live. Field accuracy is unaffected: it cannot see
+    # a spurious commitment (see ExtractionBaseline).
+    "claude-haiku-4-5": ExtractionBaseline(90.8, 0.961, "2026-08-20, --runs 5, pre-T03-relabel"),
 }
 
 EXTRACTION_ACCURACY_REGRESSION_THRESHOLD_PCT = 10.0  # points below baseline before alerting
