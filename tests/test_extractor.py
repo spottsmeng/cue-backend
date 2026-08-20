@@ -685,3 +685,165 @@ async def test_low_self_reported_confidence_routes_to_human_review(
     )
     await app_session.commit()
     assert outcome.created[0].verification_state == "pending_verification"
+
+
+# --- CD03: the vendor is named in the span, not in counterparty_name -------
+
+
+def test_vendor_prefix_matching_disambiguates_names_that_share_a_token():
+    """Unit-level, because the risk is specific and this corpus contains it:
+    "Ah Seng Production" and "Kim Seng Logistics" share the token "seng", so
+    any-token matching would attribute one vendor's commitments to the other
+    roughly at random. Leading-prefix matching asks for "ah seng" or "kim
+    seng" and gets neither wrong."""
+    from app.ledger.extractor import _vendors_named_in
+
+    vendors = ["Ah Seng Production", "Kim Seng Logistics", "Vertex Fabrication", "Bloomworks"]
+
+    assert _vendors_named_in("Ah Seng's LED screen install", vendors) == ["Ah Seng Production"]
+    assert _vendors_named_in("Kim Seng will handle the lift", vendors) == ["Kim Seng Logistics"]
+    assert _vendors_named_in("nothing relevant here", vendors) == []
+    # A single distinctive token still counts; a two-letter one never does.
+    assert _vendors_named_in("bloomworks confirmed", vendors) == ["Bloomworks"]
+    assert _vendors_named_in("ahead of schedule", vendors) == []
+
+
+@pytest.mark.asyncio
+async def test_vendor_named_possessively_in_the_span_is_recovered_in_code(
+    app_session, org_and_project
+):
+    """cue-eval CD03, reproduced: the model splits the two promises correctly
+    (8/8 runs on qwen2.5:14b) and leaves counterparty_name empty on both,
+    while writing the vendor into deliverable_original as "Ah Seng's LED
+    screen install". The name was always there; nothing read it.
+
+    Recovered in code rather than by prompt wording deliberately — CLAUDE.md
+    records two attempts to teach the model this rule, both reverted for
+    breaking IC01, one of them by burying the amount in a deliverable field.
+    """
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    await _get_or_create_party(app_session, org_id, "Ah Seng Production", "vendor_org")
+    await app_session.flush()
+
+    case = _team_collaboration_case(
+        "Ah Seng's LED screen install is still sitting as proposed, no confirmed date yet."
+    )
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT, case=case,
+        client=FakeModelClient({"commitments": [_item(
+            act_type="escalate", deliverable_en="LED screen install",
+            deliverable_original="Ah Seng's LED screen install",
+            evidence_span="Ah Seng's LED screen install", counterparty_name=None,
+        )]}),
+    )
+    await app_session.commit()
+
+    commitment = outcome.created[0]
+    party = (
+        await app_session.execute(select(Party).where(Party.id == commitment.party_id))
+    ).scalar_one()
+    assert party.display_name == "Ah Seng Production"  # not "Unresolved Vendor"
+    # Still inference, so still a human's call — but on the right vendor.
+    assert commitment.verification_state == "pending_verification"
+
+
+@pytest.mark.asyncio
+async def test_a_vendor_with_no_prior_commitment_is_still_recognised(
+    app_session, org_and_project
+):
+    """`context["vendors"]` is built by joining Party to Commitment, so it
+    only ever contains vendors who already hold one on this project. CD03's
+    Vertex has none — which is exactly when getting attribution right matters
+    most, and exactly the case that list cannot see. The lookup is org-scoped
+    for this reason."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    await _get_or_create_party(app_session, org_id, "Vertex Fabrication", "vendor_org")
+    await app_session.flush()
+    assert not any(v["party"] == "Vertex Fabrication" for v in CONTEXT.get("vendors", []))
+
+    case = _team_collaboration_case("Vertex's aluminium frame delivery has no confirmed date.")
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT, case=case,
+        client=FakeModelClient({"commitments": [_item(
+            act_type="escalate", deliverable_en="aluminium frame delivery",
+            deliverable_original="Vertex's aluminium frame delivery",
+            evidence_span="Vertex's aluminium frame delivery", counterparty_name=None,
+        )]}),
+    )
+    await app_session.commit()
+
+    party = (
+        await app_session.execute(
+            select(Party).where(Party.id == outcome.created[0].party_id)
+        )
+    ).scalar_one()
+    assert party.display_name == "Vertex Fabrication"
+
+
+@pytest.mark.asyncio
+async def test_one_commitment_naming_two_vendors_is_flagged_as_a_merge(
+    app_session, org_and_project
+):
+    """The under-splitting detector — the mirror of _overlapping_span_indexes,
+    which only ever caught over-splitting. A single commitment cannot be owed
+    by two companies, so a span naming both is either two promises welded into
+    one row (the PDF's Problem 2) or a span too wide to attribute. Neither is
+    something to guess at, and neither was detectable before: a merged item is
+    one item with one non-overlapping span, structurally invisible."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    await _get_or_create_party(app_session, org_id, "Ah Seng Production", "vendor_org")
+    await _get_or_create_party(app_session, org_id, "Vertex Fabrication", "vendor_org")
+    await app_session.flush()
+
+    span = "Ah Seng's LED screen install and Vertex's aluminium frame delivery"
+    case = _team_collaboration_case(f"{span} are both still unconfirmed.")
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT, case=case,
+        client=FakeModelClient({"commitments": [_item(
+            act_type="escalate", deliverable_en="LED screen install and frame delivery",
+            deliverable_original=span, evidence_span=span,
+            # Deliberately a *confident* attribution: "Ah Seng Production" is
+            # a known vendor, so without the merge detector this row would be
+            # written straight to the ledger as `auto`. That is what makes
+            # this test isolate the detector rather than re-testing the
+            # unresolved-vendor path, which already flags everything it sees.
+            counterparty_name="Ah Seng Production",
+        )]}),
+    )
+    await app_session.commit()
+
+    commitment = outcome.created[0]
+    assert commitment.verification_state == "pending_verification"
+
+
+@pytest.mark.asyncio
+async def test_direct_vendor_chat_still_attributes_to_the_sender(
+    app_session, org_and_project
+):
+    """The span scan must not leak onto external_vendor_chat. There, a vendor
+    naming another vendor ("I'll coordinate the lift with Kim Seng") is
+    describing a third party, not handing over the promise — attributing to
+    the mentioned name would move commitments onto the wrong ledger."""
+    org_id, project_id = org_and_project
+    await set_org_context(app_session, org_id)
+    await _get_or_create_party(app_session, org_id, "Kim Seng Logistics", "vendor_org")
+    await app_session.flush()
+
+    outcome = await extract_case(
+        app_session, project_id=project_id, organisation_id=org_id, context=CONTEXT,
+        case=make_case("I'll coordinate the lift with Kim Seng on Tuesday"),
+        client=FakeModelClient({"commitments": [_item(
+            evidence_span="coordinate the lift with Kim Seng", counterparty_name=None,
+        )]}),
+    )
+    await app_session.commit()
+
+    party = (
+        await app_session.execute(
+            select(Party).where(Party.id == outcome.created[0].party_id)
+        )
+    ).scalar_one()
+    assert party.display_name == "Test Vendor"  # the sender, per make_case

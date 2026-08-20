@@ -108,6 +108,12 @@ class _VerifiedItem:
     vendor_name: str
     party_confident: bool
     relates_to_id: uuid.UUID | None
+    # More than one of the tenant's vendors named inside this single item's
+    # evidence span — the under-splitting signature, the mirror of
+    # _overlapping_span_indexes. One commitment cannot be owed by two
+    # companies, so either the model welded two promises into one row or the
+    # span is too wide to attribute; both are for a human, not a guess.
+    names_multiple_vendors: bool = False
 
 
 def build_prompt(
@@ -197,6 +203,76 @@ def _match_known_vendor(vendors: list[dict], name: str) -> str | None:
     return None
 
 
+def _normalise_for_match(text: str) -> str:
+    """Casefolded, with every run of non-alphanumerics collapsed to one space,
+    so "Ah Seng's" and "Ah Seng Production" line up on "ah seng" and
+    punctuation cannot break a match."""
+    return " ".join("".join(c if c.isalnum() else " " for c in text.casefold()).split())
+
+
+# A one-token vendor match has to be at least this long to count. "Ah" would
+# otherwise match the "ah" inside any word; "Vertex" and "Bloomworks" are
+# distinctive on their own. Two-token matches skip the check — "ah seng" is
+# specific enough at any length.
+_MIN_SINGLE_TOKEN_VENDOR_MATCH = 4
+
+
+def _vendors_named_in(text: str, vendor_names: list[str]) -> list[str]:
+    """Canonical vendor names this text appears to name, longest match first.
+
+    Matches the longest *leading* token-prefix of each vendor name, not any
+    token anywhere. That distinction is load-bearing in this very corpus: "Ah
+    Seng Production" and "Kim Seng Logistics" share the token "seng", so
+    any-token matching would attribute Ah Seng's commitments to Kim Seng
+    roughly at random. Prefix matching asks for "ah seng" or "kim seng" and
+    gets neither wrong.
+
+    Prefix rather than whole-name because the possessive is how people
+    actually write it — cue-eval CD03's message says "Ah Seng's LED screen
+    install", and the model faithfully copies that into deliverable_original
+    while leaving counterparty_name empty. The name is right there; nothing
+    was reading it.
+
+    CJK names fall out of the same code path without special-casing: they
+    normalise to a single token and match as a substring, which is what you
+    want when there are no word boundaries to split on.
+    """
+    haystack = _normalise_for_match(text)
+    found: list[tuple[int, str]] = []
+    for canonical in vendor_names:
+        tokens = _normalise_for_match(canonical).split()
+        for size in range(len(tokens), 0, -1):
+            prefix = " ".join(tokens[:size])
+            if size == 1 and len(prefix) < _MIN_SINGLE_TOKEN_VENDOR_MATCH:
+                continue
+            if prefix in haystack:
+                found.append((len(prefix), canonical))
+                break
+    return [canonical for _length, canonical in sorted(found, reverse=True)]
+
+
+async def _load_org_vendor_names(session: AsyncSession, organisation_id: uuid.UUID) -> list[str]:
+    """Every vendor this tenant knows, not just the ones already holding a
+    commitment on this project.
+
+    `context["vendors"]` is built by joining Party to Commitment
+    (app/capture/extraction_bridge.py), so a vendor named in a message before
+    they have their first commitment is invisible to it — which is exactly
+    the case CD03 is made of, and exactly when getting attribution right
+    matters most.
+    """
+    return list(
+        (
+            await session.execute(
+                select(Party.display_name).where(
+                    Party.organisation_id == organisation_id,
+                    Party.type == "vendor_org",
+                )
+            )
+        ).scalars().all()
+    )
+
+
 def _clean_counterparty_name(case: FixtureCase, counterparty_name: str | None) -> str | None:
     """cue-eval/prompt.txt asks the model, in words, to "never fill this with
     the sender's own name — it names who the commitment is ABOUT, not who is
@@ -222,7 +298,12 @@ def _clean_counterparty_name(case: FixtureCase, counterparty_name: str | None) -
 
 
 def _resolve_vendor_for_item(
-    case: FixtureCase, context: ProjectContext, counterparty_name: str | None
+    case: FixtureCase,
+    context: ProjectContext,
+    counterparty_name: str | None,
+    *,
+    span_text: str | None = None,
+    org_vendor_names: list[str] | None = None,
 ) -> tuple[str, bool]:
     """Who the commitment's `party` (who owes it) should be, and whether
     that attribution is confident enough to skip pending_verification.
@@ -247,6 +328,23 @@ def _resolve_vendor_for_item(
     """
     if case.get("channel_capability") != "team_collaboration":
         return case["party"], True
+
+    # The model left counterparty_name empty, but the span it cited may name
+    # a vendor anyway — CD03's "Ah Seng's LED screen install" is the shape.
+    # Recovered in code rather than by prompt wording on purpose: two attempts
+    # to teach the model this rule are recorded in CLAUDE.md, both reverted
+    # for breaking IC01, and one by burying the amount in a deliverable field
+    # — the exact failure the deliverable rule exists to prevent. A string
+    # match against the tenant's own vendor list cannot regress a case it
+    # never touches.
+    if not counterparty_name and span_text:
+        named = _vendors_named_in(span_text, org_vendor_names or [])
+        if len(named) == 1:
+            # Deliberately still unconfident: this is inference, and
+            # FR-LED-07's posture is that the review queue is the safe
+            # direction. A PM now sees the real vendor on a row they were
+            # going to check anyway, instead of "Unresolved Vendor".
+            return named[0], False
 
     if counterparty_name:
         matched = _match_known_vendor(context.get("vendors", []), counterparty_name)
@@ -381,6 +479,7 @@ async def extract_case(
 
     # --- pass 1: verify. Nothing below this point writes anything. ---
     tz = _project_tzinfo(context)
+    org_vendor_names = await _load_org_vendor_names(session, organisation_id)
     verified: list[_VerifiedItem] = []
     for item in result.commitments:
         if not item.evidence_span or item.evidence_span not in case["message"]:
@@ -399,7 +498,10 @@ async def extract_case(
             )
 
         counterparty_name = _clean_counterparty_name(case, item.counterparty_name)
-        vendor_name, party_confident = _resolve_vendor_for_item(case, context, counterparty_name)
+        vendor_name, party_confident = _resolve_vendor_for_item(
+            case, context, counterparty_name,
+            span_text=item.evidence_span, org_vendor_names=org_vendor_names,
+        )
         span_start = case["message"].index(item.evidence_span)
         verified.append(
             _VerifiedItem(
@@ -411,6 +513,16 @@ async def extract_case(
                 vendor_name=vendor_name,
                 party_confident=party_confident,
                 relates_to_id=relates_to_id,
+                # Only where attribution comes from the message body. On a
+                # direct vendor chat the sender *is* the vendor, so a span
+                # mentioning two other companies is a vendor describing
+                # subcontractors, not two promises welded together — flagging
+                # it there would be a false positive on the commonest shape of
+                # message in the corpus.
+                names_multiple_vendors=(
+                    case.get("channel_capability") == "team_collaboration"
+                    and len(_vendors_named_in(item.evidence_span, org_vendor_names)) > 1
+                ),
             )
         )
 
@@ -447,6 +559,7 @@ async def extract_case(
             or v.due_at is not None
             or not v.party_confident
             or index in overlapping
+            or v.names_multiple_vendors
             or v.item.confidence < _LOW_CONFIDENCE
         )
 
