@@ -220,6 +220,68 @@ async def test_list_commitments_filters_by_party(authed_org_and_project, parties
 
 
 @pytest.mark.asyncio
+async def test_list_commitments_filters_by_verification_state(authed_org_and_project, parties):
+    """The review queue has to be reachable. Extraction routes everything it
+    is unsure about to `pending_verification` — a price field, an
+    unidentifiable vendor, an over-split signature, an unapplied change
+    asserted against an already-logged commitment — and all of that is
+    decorative if a PM cannot ask for those rows separately from the verified
+    ones."""
+    org_id, project_id, user, token = authed_org_and_project
+    vendor, internal = parties
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # amount set -> pending_verification; no amount/due_at -> auto.
+        flagged = await _create_commitment(
+            client, token, project_id, vendor.id, internal.id, amount=6200, currency="SGD"
+        )
+        clean = await _create_commitment(
+            client, token, project_id, vendor.id, internal.id, deliverable_en="truss supply"
+        )
+        assert flagged.json()["verification_state"] == "pending_verification"
+        assert clean.json()["verification_state"] == "auto"
+
+        queue = await client.get(
+            f"/projects/{project_id}/commitments?verification_state=pending_verification",
+            headers=_headers(token),
+        )
+        settled = await client.get(
+            f"/projects/{project_id}/commitments?verification_state=auto",
+            headers=_headers(token),
+        )
+        unfiltered = await client.get(
+            f"/projects/{project_id}/commitments", headers=_headers(token)
+        )
+
+    queue_ids = [c["id"] for c in queue.json()]
+    settled_ids = [c["id"] for c in settled.json()]
+    assert queue_ids == [flagged.json()["id"]]
+    assert settled_ids == [clean.json()["id"]]
+    # Unfiltered still returns both — the filter narrows, it never hides.
+    assert {flagged.json()["id"], clean.json()["id"]} <= {c["id"] for c in unfiltered.json()}
+
+
+@pytest.mark.asyncio
+async def test_verification_state_filter_rejects_a_value_outside_the_enum(
+    authed_org_and_project, parties
+):
+    """Typed as VerificationStateLiteral, the same way `state` is — a typo'd
+    queue name must 422, not silently return an empty list a PM would read as
+    "nothing to review"."""
+    org_id, project_id, user, token = authed_org_and_project
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(
+            f"/projects/{project_id}/commitments?verification_state=pending",
+            headers=_headers(token),
+        )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_read_commitment_not_found(authed_org_and_project):
     org_id, project_id, user, token = authed_org_and_project
 
