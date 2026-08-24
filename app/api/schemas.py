@@ -40,7 +40,7 @@ ConsentStatusLiteral = Literal["pending", "accepted", "objected", "opted_out"]
 SpecClaimAttributeLiteral = Literal["dimension", "finish", "quantity", "price"]
 
 # Mirrors app/foresight/models.py's native enums (PRD §6.9/§6.7/§6.15).
-RiskSourceLiteral = Literal["silence", "contradiction", "forecast"]
+RiskSourceLiteral = Literal["silence", "contradiction", "forecast", "propagation"]
 RiskSeverityLiteral = Literal["low", "medium", "high", "critical"]
 RiskStatusLiteral = Literal["open", "acknowledged", "resolved", "superseded"]
 DeviationStatusLiteral = Literal["auto_drafted", "confirmed", "resolved"]

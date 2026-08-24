@@ -31,7 +31,7 @@ from app.identity.models import MembershipRole
 # new source, not a reuse of app/documents/drift.py's own, unrelated
 # "drift" concept (a circulated file differing from the project's approved
 # DocumentVersion by hash, which reuses source="contradiction").
-RiskSource = Enum("silence", "contradiction", "forecast", "model_drift", name="risk_source")
+RiskSource = Enum("silence", "contradiction", "forecast", "model_drift", "propagation", name="risk_source")
 RiskSeverity = Enum("low", "medium", "high", "critical", name="risk_severity")
 RiskStatus = Enum("open", "acknowledged", "resolved", "superseded", name="risk_status")
 

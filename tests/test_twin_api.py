@@ -176,6 +176,49 @@ async def test_update_milestone_overrides_and_audits(app_session, authed_org_and
 
 
 @pytest.mark.asyncio
+async def test_update_milestone_reschedule_raises_automatic_propagation_risk(app_session, authed_org_and_project):
+    """app/foresight/propagation.py: rescheduling a milestone that already
+    had a date, with a real downstream dependent, automatically raises a
+    Risk carrying the computed downstream impact — no separate /twin/
+    propagate call needed. A milestone with no prior planned_at (the test
+    above) must NOT trigger this — see propagation.py's own "genuine
+    reschedule" guard."""
+    org_id, project_id, admin, admin_token = authed_org_and_project
+    await set_org_context(app_session, org_id)
+    upstream = await _make_milestone(
+        app_session, project_id, "load_in", planned_at=datetime(2026, 5, 1, tzinfo=timezone.utc)
+    )
+    downstream = await _make_milestone(
+        app_session, project_id, "rigging", planned_at=datetime(2026, 5, 10, tzinfo=timezone.utc)
+    )
+    app_session.add(
+        Dependency(
+            project_id=project_id, upstream_milestone_id=upstream.id, downstream_milestone_id=downstream.id, lag_days=0
+        )
+    )
+    await app_session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.patch(
+            f"/projects/{project_id}/milestones/{upstream.id}",
+            headers=_headers(admin_token),
+            json={"planned_at": datetime(2026, 5, 6, tzinfo=timezone.utc).isoformat()},
+        )
+        assert response.status_code == 200, response.text
+
+        risks_response = await client.get(
+            f"/projects/{project_id}/risks", headers=_headers(admin_token), params={"source": "propagation"}
+        )
+    assert risks_response.status_code == 200, risks_response.text
+    risks = risks_response.json()
+    assert len(risks) == 1
+    assert risks[0]["milestone_id"] == str(upstream.id)
+    affected_ids = {a["milestone_id"] for a in risks[0]["detail"]["affected"]}
+    assert str(downstream.id) in affected_ids
+
+
+@pytest.mark.asyncio
 async def test_update_milestone_read_only_member_is_forbidden(app_session, authed_org_and_project):
     org_id, project_id, admin, _admin_token = authed_org_and_project
     await set_org_context(app_session, org_id)

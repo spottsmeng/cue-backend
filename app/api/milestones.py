@@ -17,10 +17,11 @@ from app.api.schemas import (
     MilestoneUpdate,
 )
 from app.core.db import get_session
+from app.foresight import propagation
 from app.identity.service import WRITE_ROLES
 from app.models import Milestone, Project
 from app.twin.audit import record_twin_audit_event
-from app.twin.graph import CycleError, DependencyEdge, compute_twin
+from app.twin.graph import CycleError, DependencyEdge, MilestoneNode, compute_twin
 from app.twin.models import Dependency
 from app.twin.service import build_graph, get_milestone_type_term
 
@@ -259,8 +260,26 @@ async def update_milestone(
     overwrite."""
     milestone = await _get_milestone(session, project, milestone_id)
 
+    incoming = body.model_dump(exclude_unset=True)
+    # A genuine reschedule (not a milestone getting its first date, which
+    # isn't a "delay" of anything) — snapshot the graph as it stands *before*
+    # mutation below. Must happen before the changes loop: the session's
+    # autoflush would otherwise let a later query see the already-changed
+    # date, defeating app/foresight/propagation.py's "what did this used to
+    # look like" comparison.
+    reschedule_to: datetime | None = None
+    baseline_graph: tuple[list[MilestoneNode], list[DependencyEdge]] | None = None
+    if (
+        "planned_at" in incoming
+        and incoming["planned_at"] is not None
+        and milestone.planned_at is not None
+        and incoming["planned_at"] != milestone.planned_at
+    ):
+        reschedule_to = incoming["planned_at"]
+        baseline_graph = await build_graph(session, project.id)
+
     changes: dict[str, dict[str, object]] = {}
-    for field, new_value in body.model_dump(exclude_unset=True).items():
+    for field, new_value in incoming.items():
         old_value = getattr(milestone, field)
         if new_value != old_value:
             changes[field] = {"before": _jsonable(old_value), "after": _jsonable(new_value)}
@@ -281,6 +300,18 @@ async def update_milestone(
         milestone_id=milestone.id,
         detail={"changes": changes},
     )
+
+    if baseline_graph is not None and reschedule_to is not None:
+        baseline_nodes, baseline_edges = baseline_graph
+        await propagation.record_milestone_delay(
+            session,
+            project=project,
+            milestone=milestone,
+            baseline_nodes=baseline_nodes,
+            baseline_edges=baseline_edges,
+            new_date=reschedule_to,
+        )
+
     await session.commit()
     return milestone
 
